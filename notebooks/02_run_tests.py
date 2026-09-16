@@ -1,0 +1,139 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # V0 · 在 Databricks 上跑验收测试
+# MAGIC
+# MAGIC 简报的 V0 验收标准是「**有测试证明**各分项贡献之和与总变化的差值 < 0.1%」。
+# MAGIC 目标平台是 Databricks,所以这份证明必须能在 Databricks 上出具 ——
+# MAGIC 只在本地 DuckDB 上跑通,证明的只是本地的算术。
+# MAGIC
+# MAGIC 本 notebook 用 `--rca-target=spark` 把**同一套测试**跑在当前 SparkSession 上:
+# MAGIC 建库、灌数、分解、闭合性断言,全部发生在你的 workspace 里。
+# MAGIC
+# MAGIC 写入的是独立的 `gmv_rca_test` schema,不碰 `00_setup.py` 建出来的正式 schema。
+
+# COMMAND ----------
+
+# MAGIC %pip install -q pytest sqlglot pydantic PyYAML
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+import os
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+os.chdir(REPO_ROOT)          # pytest 要靠 pyproject.toml 定位 rootdir
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+print("repo root:", REPO_ROOT)
+print("存在 pyproject.toml:", (REPO_ROOT / "pyproject.toml").is_file())
+
+# COMMAND ----------
+
+dbutils.widgets.text("catalog", "main", "Unity Catalog 目录")
+dbutils.widgets.text("test_schema", "gmv_rca_test", "测试用 schema(会被覆盖重建)")
+
+os.environ["DATABRICKS_CATALOG"] = dbutils.widgets.get("catalog")
+os.environ["RCA_TEST_SCHEMA"] = dbutils.widgets.get("test_schema")
+
+print("测试目标:", os.environ["DATABRICKS_CATALOG"], ".", os.environ["RCA_TEST_SCHEMA"])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 1. 不需要数据库的那部分
+# MAGIC
+# MAGIC 知识库校验、手算对照、SQL 方言校验、凭据处理 —— 先跑这些,快且能提前发现低级错误。
+
+# COMMAND ----------
+
+import pytest
+
+offline = pytest.main([
+    "-q",
+    "tests/test_knowledge.py",
+    "tests/test_math_analytic.py",
+    "tests/test_databricks_dialect.py",
+    "tests/test_config.py",
+    "tests/test_nl2sql_units.py",
+])
+print("\n退出码:", offline)
+assert offline == 0, "离线测试未通过 —— 先修这些,不要急着连库"
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2. 在 Spark 上跑数据相关的测试
+# MAGIC
+# MAGIC 这一步会在 `gmv_rca_test` 里建表灌数(约 7 万行会话),然后:
+# MAGIC
+# MAGIC * 样例数据的不变量(`test_sample_data.py`)
+# MAGIC * 分解的算术闭合性(`test_closure.py`)
+# MAGIC * 职责边界:越线必须报错(`test_decompose_guards.py`)
+# MAGIC * **循环本身** —— 自修复、评估器自检、状态表、改进闭环(`test_nl2sql_loop.py`)
+# MAGIC
+# MAGIC ⚠ 第一次跑要等 warehouse / serverless 计算启动,可能一两分钟。
+
+# COMMAND ----------
+
+online = pytest.main([
+    "-q",
+    "--rca-target=spark",
+    "tests/test_sample_data.py",
+    "tests/test_closure.py",
+    "tests/test_decompose_guards.py",
+    "tests/test_nl2sql_loop.py",
+])
+print("\n退出码:", online)
+assert online == 0, "在 Databricks 上未通过 —— 这才是真正要紧的失败"
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. 把闭合性的实测数字打出来
+# MAGIC
+# MAGIC 测试只给通过/失败。简历和汇报里要引用的是**具体数量级**,所以单独打一遍。
+
+# COMMAND ----------
+
+from datetime import timedelta
+
+from rca.config import build_target
+from rca.decompose import DecompositionEngine, Period
+from rca.knowledge import load_knowledge
+from rca.sampledata import SampleDataConfig
+
+knowledge = load_knowledge(REPO_ROOT / "knowledge")
+target = build_target("spark", schema=os.environ["RCA_TEST_SCHEMA"], spark=spark)
+engine = DecompositionEngine(knowledge, target.executor, target.dialect)
+
+config = SampleDataConfig(daily_sessions=1200)
+current = Period(config.end_date - timedelta(days=6), config.end_date, "本周")
+baseline = Period(current.start - timedelta(days=7), current.start - timedelta(days=1), "上周")
+
+factor = engine.decompose_factors("gmv", baseline, current)
+print(f"因子分解残差      {factor.residual_pct:.3e} %   (简报要求 < 0.1%)")
+print(f"恒等式偏差        {factor.identity_gap_pct:.3e} %")
+
+worst = 0.0
+for dimension in knowledge.ordered_dimensions("gmv"):
+    result = engine.decompose_by_dimension("gmv", dimension, baseline, current)
+    worst = max(worst, abs(result.residual_pct))
+    print(f"  {dimension:<14} 残差 {result.residual_pct:>11.3e} %")
+print(f"\n维度分解最大残差  {worst:.3e} %   (简报要求 < 0.1%)")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. 收尾
+# MAGIC
+# MAGIC 测试 schema 留着可以重复跑(下次加 `--rca-skip-setup` 跳过建库更快)。
+# MAGIC 要清掉就执行下面这格。
+
+# COMMAND ----------
+
+# spark.sql(f"DROP SCHEMA IF EXISTS {os.environ['DATABRICKS_CATALOG']}.{os.environ['RCA_TEST_SCHEMA']} CASCADE")

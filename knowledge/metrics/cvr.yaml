@@ -1,0 +1,20 @@
+name: cvr
+display_name: Conversion Rate (completed orders per session)
+ratio:
+  numerator: orders
+  denominator: uv
+scope: [ops]
+# 比率指标不可按维度做加法分解(各分项之和 ≠ 总体比率),
+# decompose_by_dimension 会显式拒绝;mix/rate 拆分留到 V1+。
+dimensions:
+  - channel
+  - device
+  - market
+  - region
+  - user_tier
+data_quality_checks:
+  freshness:
+    - table: fact_orders
+      max_lag_hours: 6
+    - table: fact_sessions
+      max_lag_hours: 6

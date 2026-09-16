@@ -1,0 +1,19 @@
+name: aov
+display_name: Average Order Value (GMV per completed order)
+ratio:
+  numerator: gmv
+  denominator: orders
+scope: [ops]
+dimensions:
+  - channel
+  - device
+  - market
+  - region
+  - category
+  - sub_category
+  - price_tier
+  - user_tier
+data_quality_checks:
+  freshness:
+    - table: fact_orders
+      max_lag_hours: 6

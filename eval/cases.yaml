@@ -1,0 +1,258 @@
+# ---------------------------------------------------------------------------
+# text-to-SQL 评估集
+#
+# 每条 case 只声明「问的是哪个指标 / 维度 / 窗口」,**不写 SQL**。
+# 标准答案由 src/rca/nl2sql/cases.py 按 knowledge/ 里的定义生成参考 SQL 再执行 ——
+# 样例数据重建后答案自动跟着变,不需要重新标注,口径也不会与系统不一致。
+#
+# 窗口用 W1..W8 标签,由 resolve_period() 解析成具体日期。
+#
+# holdout: true 是**留出集**。改进循环不得拿它调知识,
+#          它专门用来验证改进不是过拟合到已知失败上。
+#
+# unanswerable: 正确答案是**拒答**。数据里根本没有这个字段。
+#          这是最重要的一类 —— 一个 pass@1 很高、但对答不了的问题照样编 SQL 的模型,
+#          在生产里是危险的。呼应原简报 §3.3「无异常对照组权重最高」。
+# ---------------------------------------------------------------------------
+cases:
+
+  # ---- 标量聚合:可加指标 --------------------------------------------------
+  - id: gmv_total_w8
+    question: "What was the total GMV last week?"
+    question_zh: "上周总 GMV 是多少?"
+    difficulty: easy
+    tags: [aggregate, no_filter]
+    gold: {kind: aggregate, metric: gmv, period: W8}
+
+  - id: gmv_us_w8
+    question: "What was the total GMV in the US market last week?"
+    question_zh: "上周美国市场的 GMV 是多少?"
+    difficulty: easy
+    tags: [aggregate, filter]
+    gold: {kind: aggregate, metric: gmv, period: W8, filters: {market: US}}
+
+  - id: sessions_w8
+    question: "How many sessions did we have last week?"
+    question_zh: "上周有多少会话?"
+    difficulty: easy
+    tags: [aggregate, other_table]
+    gold: {kind: aggregate, metric: uv, period: W8}
+
+  - id: orders_mobile_w8
+    question: "How many completed orders came from mobile last week?"
+    question_zh: "上周移动端有多少已完成订单?"
+    difficulty: easy
+    tags: [aggregate, filter, status_filter]
+    gold: {kind: aggregate, metric: orders, period: W8, filters: {device: mobile}}
+
+  - id: gmv_paid_search_mobile_w8
+    question: "What was the GMV from Paid Search on mobile last week?"
+    question_zh: "上周 Paid Search 渠道移动端的 GMV 是多少?"
+    difficulty: medium
+    tags: [aggregate, multi_filter]
+    gold:
+      kind: aggregate
+      metric: gmv
+      period: W8
+      filters: {channel: Paid Search, device: mobile}
+
+  # ---- 标量聚合:比率指标(跨表口径) --------------------------------------
+  - id: cvr_w8
+    question: "What was the conversion rate last week?"
+    question_zh: "上周的转化率是多少?"
+    difficulty: medium
+    tags: [ratio, cross_table]
+    gold: {kind: aggregate, metric: cvr, period: W8}
+
+  - id: aov_w8
+    question: "What was the average order value last week?"
+    question_zh: "上周的客单价是多少?"
+    difficulty: medium
+    tags: [ratio]
+    gold: {kind: aggregate, metric: aov, period: W8}
+
+  - id: cvr_paid_search_w8
+    question: "What was the conversion rate for the Paid Search channel last week?"
+    question_zh: "上周 Paid Search 渠道的转化率是多少?"
+    difficulty: hard
+    tags: [ratio, cross_table, filter]
+    gold:
+      kind: aggregate
+      metric: cvr
+      period: W8
+      filters: {channel: Paid Search}
+
+  # ---- 分组 --------------------------------------------------------------
+  - id: gmv_by_channel_w8
+    question: "Break down last week's GMV by marketing channel."
+    question_zh: "上周 GMV 按渠道拆开分别是多少?"
+    difficulty: easy
+    tags: [group_by]
+    gold: {kind: group_by, metric: gmv, dimension: channel, period: W8}
+
+  - id: gmv_by_device_w8
+    question: "How did last week's GMV split between mobile and desktop?"
+    question_zh: "上周 GMV 在移动端和桌面端各是多少?"
+    difficulty: easy
+    tags: [group_by]
+    gold: {kind: group_by, metric: gmv, dimension: device, period: W8}
+
+  - id: gmv_by_category_w8
+    question: "What was last week's GMV by product category?"
+    question_zh: "上周各商品品类的 GMV 是多少?"
+    difficulty: medium
+    tags: [group_by, join]
+    gold: {kind: group_by, metric: gmv, dimension: category, period: W8}
+
+  - id: gmv_by_user_tier_w8
+    question: "What was last week's GMV by customer tier?"
+    question_zh: "上周各用户分层的 GMV 是多少?"
+    difficulty: medium
+    tags: [group_by, join]
+    gold: {kind: group_by, metric: gmv, dimension: user_tier, period: W8}
+
+  - id: uv_by_channel_w8
+    question: "How many sessions did each marketing channel bring last week?"
+    question_zh: "上周各渠道带来多少会话?"
+    difficulty: easy
+    tags: [group_by, other_table]
+    gold: {kind: group_by, metric: uv, dimension: channel, period: W8}
+
+  - id: gmv_by_channel_mobile_w8
+    question: "Break down last week's mobile GMV by marketing channel."
+    question_zh: "上周移动端的 GMV 按渠道拆开是多少?"
+    difficulty: medium
+    tags: [group_by, filter]
+    gold:
+      kind: group_by
+      metric: gmv
+      dimension: channel
+      period: W8
+      filters: {device: mobile}
+
+  - id: top3_channels_by_gmv_w8
+    question: "Which were the top 3 marketing channels by GMV last week? Return them in descending order of GMV."
+    question_zh: "上周 GMV 最高的三个渠道是哪些?按 GMV 降序返回。"
+    difficulty: medium
+    tags: [group_by, ordered, limit]
+    gold:
+      kind: group_by
+      metric: gmv
+      dimension: channel
+      period: W8
+      order: desc
+      limit: 3
+
+  # ---- 环比变化 ----------------------------------------------------------
+  - id: gmv_wow_change
+    question: "How much did GMV change last week compared with the week before?"
+    question_zh: "上周 GMV 相比前一周变化了多少?"
+    difficulty: medium
+    tags: [change, two_windows]
+    gold: {kind: change, metric: gmv, period: W8, baseline: W7}
+
+  - id: cvr_wow_change
+    question: "How much did the conversion rate change last week compared with the week before?"
+    question_zh: "上周转化率相比前一周变化了多少?"
+    difficulty: hard
+    tags: [change, ratio, cross_table, two_windows]
+    gold: {kind: change, metric: cvr, period: W8, baseline: W7}
+
+  - id: uv_wow_change_us
+    question: "How much did US sessions change last week compared with the week before?"
+    question_zh: "上周美国市场的会话数相比前一周变化了多少?"
+    difficulty: hard
+    tags: [change, filter, two_windows]
+    gold:
+      kind: change
+      metric: uv
+      period: W8
+      baseline: W7
+      filters: {market: US}
+
+  # ---- 不可答对照组 ------------------------------------------------------
+  - id: unanswerable_campaign_gmv
+    question: "Which advertising campaign drove the most GMV last week?"
+    question_zh: "上周哪个广告计划带来的 GMV 最高?"
+    difficulty: hard
+    tags: [unanswerable, missing_join_key]
+    gold:
+      kind: unanswerable
+      reason: >-
+        fact_orders 与 fact_sessions 上都没有 campaign_id;campaign 只存在于
+        fact_ad_spend,而这张表只有花费与点击,没有 GMV。没有任何键能把订单归到
+        广告计划上,因此这个问题在现有数据下无法回答。
+
+  - id: unanswerable_customer_email
+    question: "What is the email address of our highest-spending customer last week?"
+    question_zh: "上周消费最高的客户邮箱是什么?"
+    difficulty: easy
+    tags: [unanswerable, missing_column]
+    gold:
+      kind: unanswerable
+      reason: >-
+        dim_user 上只有 region / market / signup_dt / user_tier,没有任何联系方式字段。
+
+  - id: unanswerable_profit_margin
+    question: "What was our gross profit margin last week?"
+    question_zh: "上周的毛利率是多少?"
+    difficulty: medium
+    tags: [unanswerable, missing_metric]
+    gold:
+      kind: unanswerable
+      reason: >-
+        没有任何成本数据(商品成本、履约成本都不存在),只有 order_amount,算不出毛利。
+
+  # ---- 留出集:改进循环不得用它调知识 --------------------------------------
+  - id: holdout_gmv_by_price_tier_w7
+    question: "What was the GMV by price tier two weeks ago?"
+    question_zh: "两周前各价格带的 GMV 是多少?"
+    difficulty: medium
+    tags: [group_by, join]
+    holdout: true
+    gold: {kind: group_by, metric: gmv, dimension: price_tier, period: W7}
+
+  - id: holdout_aov_desktop_w8
+    question: "What was the average order value on desktop last week?"
+    question_zh: "上周桌面端的客单价是多少?"
+    difficulty: medium
+    tags: [ratio, filter]
+    holdout: true
+    gold:
+      kind: aggregate
+      metric: aov
+      period: W8
+      filters: {device: desktop}
+
+  - id: holdout_orders_by_region_w8
+    question: "How many completed orders did each region produce last week?"
+    question_zh: "上周各大区分别有多少已完成订单?"
+    difficulty: easy
+    tags: [group_by]
+    holdout: true
+    gold: {kind: group_by, metric: orders, dimension: region, period: W8}
+
+  - id: holdout_gmv_wow_de
+    question: "How much did GMV in the German market change last week versus the week before?"
+    question_zh: "上周德国市场 GMV 相比前一周变化了多少?"
+    difficulty: hard
+    tags: [change, filter, two_windows]
+    holdout: true
+    gold:
+      kind: change
+      metric: gmv
+      period: W8
+      baseline: W7
+      filters: {market: DE}
+
+  - id: holdout_unanswerable_return_reason
+    question: "What was the most common reason customers returned items last week?"
+    question_zh: "上周客户退货最常见的原因是什么?"
+    difficulty: medium
+    tags: [unanswerable, missing_column]
+    holdout: true
+    gold:
+      kind: unanswerable
+      reason: >-
+        fact_orders 只有 order_status(COMPLETED / CANCELLED / REFUNDED),
+        没有任何退货原因字段。能查到「有多少退款单」,但查不到「为什么退」。

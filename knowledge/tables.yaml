@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# 表登记簿(schema 的唯一真源)
+#
+# 用途有三:
+#   1. sql/setup/*.sql 的 DDL 由本文件渲染生成 —— 避免建表脚本与知识库漂移
+#   2. knowledge.py 校验指标的 source_table / filters_default / 维度列是否存在
+#   3. decompose.py 生成 SQL 时用它做列白名单(防注入 + 早失败)
+#
+# grain: 一行代表什么。partition_column: 日粒度分区列(L0 数据质量检查会用)。
+# ---------------------------------------------------------------------------
+tables:
+  - name: fact_orders
+    kind: fact
+    grain: 一个订单
+    partition_column: dt
+    columns:
+      order_id:     {type: string,          nullable: false}
+      session_id:   {type: string,          nullable: false}   # 订单归属的会话,用于核对 CVR
+      user_id:      {type: bigint,          nullable: false}
+      product_id:   {type: bigint,          nullable: false}
+      channel:      {type: string,          nullable: false}
+      device:       {type: string,          nullable: false}
+      region:       {type: string,          nullable: false}
+      market:       {type: string,          nullable: false}
+      order_amount: {type: "decimal(12,2)",   nullable: false}
+      order_status: {type: string,          nullable: false}
+      dt:           {type: date,            nullable: false}
+
+  - name: fact_sessions
+    kind: fact
+    grain: 一个访问会话
+    partition_column: dt
+    columns:
+      session_id: {type: string,  nullable: false}
+      user_id:    {type: bigint,  nullable: false}
+      channel:    {type: string,  nullable: false}
+      device:     {type: string,  nullable: false}
+      region:     {type: string,  nullable: false}
+      market:     {type: string,  nullable: false}
+      converted:  {type: boolean, nullable: false}
+      dt:         {type: date,    nullable: false}
+
+  - name: fact_ad_spend
+    kind: fact
+    grain: 一个 campaign 一天
+    partition_column: dt
+    columns:
+      campaign_id: {type: string,        nullable: false}
+      channel:     {type: string,        nullable: false}
+      market:      {type: string,        nullable: false}
+      spend:       {type: "decimal(12,2)", nullable: false}
+      impressions: {type: bigint,        nullable: false}
+      clicks:      {type: bigint,        nullable: false}
+      dt:          {type: date,          nullable: false}
+
+  - name: dim_product
+    kind: dim
+    grain: 一个商品
+    primary_key: product_id
+    columns:
+      product_id:   {type: bigint, nullable: false}
+      category:     {type: string, nullable: false}
+      sub_category: {type: string, nullable: false}
+      price_tier:   {type: string, nullable: false}
+
+  - name: dim_user
+    kind: dim
+    grain: 一个用户
+    primary_key: user_id
+    columns:
+      user_id:   {type: bigint, nullable: false}
+      region:    {type: string, nullable: false}
+      market:    {type: string, nullable: false}
+      signup_dt: {type: date,   nullable: false}
+      user_tier: {type: string, nullable: false}

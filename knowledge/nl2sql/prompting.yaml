@@ -1,0 +1,24 @@
+# L3 改进循环唯一被允许修改的文件:提示与 few-shot 示例,不含任何代码逻辑。
+#
+# version 是回归闸门的锚点 —— nl2sql_eval_runs.knowledge_version 记的就是它。
+# 每次改进由 propose_improvement() 生成候选版本,通过回归闸门后才提交。
+#
+# 每条新增项都带 source_run(哪次评估发现的)与 fixes_case(为了修哪条 case)。
+# 没有这两个字段,几周后就没人说得清某条提示当初是为了解决什么问题。
+#
+# examples 初始为空 —— 示例应当由失败驱动产生,而不是一开始凭感觉写一堆。
+version: 1
+hints:
+  - text: >-
+      GMV, order counts and AOV must be filtered to order_status = 'COMPLETED'.
+      CANCELLED and REFUNDED orders are excluded from all revenue metrics.
+  - text: >-
+      Conversion rate is completed orders divided by sessions. The numerator comes
+      from fact_orders and the denominator from fact_sessions - they are different
+      tables, so compute each side separately and then divide.
+  - text: >-
+      "UV" in this warehouse means session count (fact_sessions), not distinct visitors.
+  - text: >-
+      category, sub_category and price_tier live on dim_product and must be reached by
+      joining fact_orders on product_id. user_tier lives on dim_user (join on user_id).
+examples: []

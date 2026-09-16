@@ -1,0 +1,32 @@
+name: gmv
+display_name: Gross Merchandise Value
+sql: SUM(order_amount)
+source_table: fact_orders
+filters_default:
+  order_status: "COMPLETED"
+scope: [ops]                    # 财务口径(含退款回冲、跨期确认)另有定义,不可混用
+decomposition:
+  type: multiplicative
+  factors: [uv, cvr, aov]       # GMV = UV × CVR × AOV,恒等式由 knowledge.py 符号验证
+dimensions:                     # 允许的钻取维度;顺序须与 dimensions.yaml 的 priority 一致
+  - channel
+  - device
+  - market
+  - region
+  - category
+  - sub_category
+  - price_tier
+  - user_tier
+data_quality_checks:
+  freshness:
+    - table: fact_orders
+      max_lag_hours: 6
+    - table: fact_sessions
+      max_lag_hours: 6
+  completeness:
+    - table: fact_orders
+      check: partition_row_count_vs_7d_avg
+      min_ratio: 0.8
+    - table: fact_sessions
+      check: partition_row_count_vs_7d_avg
+      min_ratio: 0.8

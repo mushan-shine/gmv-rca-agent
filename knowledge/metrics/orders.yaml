@@ -1,0 +1,27 @@
+# 基础可加指标。GMV = UV × CVR × AOV 中,CVR 与 AOV 都是比率,
+# 它们的分子/分母必须落到可加基础指标上,否则恒等式无法在 SQL 层闭合。
+# 简报的 metrics/ 清单未列出 orders,这是为满足「乘法分解精确成立」而必需的补充。
+name: orders
+display_name: Completed Orders
+sql: COUNT(DISTINCT order_id)
+source_table: fact_orders
+filters_default:
+  order_status: "COMPLETED"     # 必须与 gmv 完全一致,否则 AOV = GMV/orders 口径错位
+scope: [ops]
+dimensions:
+  - channel
+  - device
+  - market
+  - region
+  - category
+  - sub_category
+  - price_tier
+  - user_tier
+data_quality_checks:
+  freshness:
+    - table: fact_orders
+      max_lag_hours: 6
+  completeness:
+    - table: fact_orders
+      check: partition_row_count_vs_7d_avg
+      min_ratio: 0.8

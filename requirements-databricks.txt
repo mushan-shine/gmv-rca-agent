@@ -1,0 +1,11 @@
+# Databricks Notebook / Job 里用:
+#     %pip install -r ../requirements-databricks.txt
+#
+# 只列 Databricks Runtime 里没有、而本项目需要的包。
+# pyspark 由 Runtime 提供,不要自己装。
+pydantic>=2.7
+PyYAML>=6.0
+sqlglot>=25.0     # 生成 SQL 的静态守卫,运行时依赖
+
+# 只有要在 Databricks 上跑验收测试(notebooks/02_run_tests.py)才需要:
+pytest>=8.0

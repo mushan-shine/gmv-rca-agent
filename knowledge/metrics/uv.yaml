@@ -1,0 +1,23 @@
+# 口径说明:本项目的 UV = 会话数(session),不是去重访客数(unique visitor)。
+# 理由:只有当 CVR 的分母与 UV 同为会话数时,GMV = UV × CVR × AOV 才精确成立。
+# 若改成去重访客数,恒等式立刻破裂,残差将失去「唯一确定性信号」的地位。
+name: uv
+display_name: Sessions (Visits)
+sql: COUNT(DISTINCT session_id)
+source_table: fact_sessions
+filters_default: {}
+scope: [ops]
+dimensions:
+  - channel
+  - device
+  - market
+  - region
+  - user_tier
+data_quality_checks:
+  freshness:
+    - table: fact_sessions
+      max_lag_hours: 6
+  completeness:
+    - table: fact_sessions
+      check: partition_row_count_vs_7d_avg
+      min_ratio: 0.8

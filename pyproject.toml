@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gmv-rca-agent"
+version = "0.0.1"
+description = "GMV anomaly root-cause-analysis agent on Databricks (V0: deterministic decomposition core)"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+    "sqlglot>=25.0",   # 生成 SQL 的静态守卫(只读校验 + 表/列白名单 + 幻觉检测)
+]
+
+[project.optional-dependencies]
+# 目标平台:从本机/CI 连 SQL Warehouse。在 Databricks Notebook / Job 里运行时
+# 走 SparkSession,不需要这个依赖。
+databricks = ["databricks-sql-connector>=3.0"]
+# 本地开发:同一份 SQL 生成器的第二个方言,用于秒级验证算术闭合性。
+local = ["duckdb>=1.0"]
+dev = [
+    "pytest>=8.0",
+    "duckdb>=1.0",
+    "databricks-sql-connector>=3.0",  # pytest --rca-target=databricks 需要
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rca"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+# --rca-target 决定整套验收测试跑在哪个引擎上(duckdb / spark / databricks),
+# 见 tests/conftest.py。markers 在 conftest 里注册。

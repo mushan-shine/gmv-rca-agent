@@ -1,0 +1,88 @@
+# ---------------------------------------------------------------------------
+# 维度注册表
+#
+# priority 数字越小越优先钻取。**这是 L3 改进循环唯一被允许修改的排序**
+# (V0 不实现 L3,此处仅固化默认顺序并保证 decompose 能读到)。
+#
+# availability: 该维度在哪些表上可用、通过哪个列或哪条 join 路径拿到。
+#   - 无 join  → 原生列,分解一定闭合
+#   - 有 join  → 需 LEFT JOIN 维表;join.unique 声明右表主键唯一,
+#                若实际不唯一会发生 fan-out,残差会变负 → 被 decompose 捕获
+#
+# 约束:decompose_factors 的 filters 只能用「在全部参与表上都可用且无 join」的维度,
+#       因为 UV 来自 fact_sessions、GMV 来自 fact_orders,口径必须对齐。
+# ---------------------------------------------------------------------------
+dimensions:
+  - name: channel
+    display_name: 渠道
+    priority: 1
+    availability:
+      fact_orders:   {column: channel}
+      fact_sessions: {column: channel}
+      fact_ad_spend: {column: channel}
+
+  - name: device
+    display_name: 设备
+    priority: 2
+    availability:
+      fact_orders:   {column: device}
+      fact_sessions: {column: device}
+
+  - name: market
+    display_name: 市场(国家)
+    priority: 3
+    availability:
+      fact_orders:   {column: market}
+      fact_sessions: {column: market}
+      fact_ad_spend: {column: market}
+      dim_user:      {column: market}
+
+  - name: region
+    display_name: 大区
+    priority: 4
+    parent_of: [market]          # region ⊃ market,仅作文档,V0 不做层级推导
+    availability:
+      fact_orders:   {column: region}
+      fact_sessions: {column: region}
+      dim_user:      {column: region}
+
+  - name: category
+    display_name: 品类
+    priority: 5
+    availability:
+      fact_orders:
+        column: category
+        join: {table: dim_product, left_key: product_id, right_key: product_id, unique: true}
+
+  - name: sub_category
+    display_name: 子品类
+    priority: 6
+    availability:
+      fact_orders:
+        column: sub_category
+        join: {table: dim_product, left_key: product_id, right_key: product_id, unique: true}
+
+  - name: price_tier
+    display_name: 价格带
+    priority: 7
+    availability:
+      fact_orders:
+        column: price_tier
+        join: {table: dim_product, left_key: product_id, right_key: product_id, unique: true}
+
+  - name: user_tier
+    display_name: 用户分层
+    priority: 8
+    availability:
+      fact_orders:
+        column: user_tier
+        join: {table: dim_user, left_key: user_id, right_key: user_id, unique: true}
+      fact_sessions:
+        column: user_tier
+        join: {table: dim_user, left_key: user_id, right_key: user_id, unique: true}
+
+  - name: campaign
+    display_name: 广告计划
+    priority: 9
+    availability:
+      fact_ad_spend: {column: campaign_id}
