@@ -30,7 +30,7 @@ L1 永远发现不了。
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -64,6 +64,11 @@ class CaseResult:
     tags: tuple[str, ...] = ()
     model: str = ""
     tokens: int = 0
+    last_sql: str = ""
+    """最后一轮尝试写出的 SQL(没跑通的也记)。改进循环拿它做失败证据。"""
+
+    last_feedback: str = ""
+    """最后一轮收到的反馈(守卫 / 上下文检查 / 引擎报错)。"""
 
     @property
     def verdict(self) -> str:
@@ -90,6 +95,9 @@ class EvalReport:
     usage: UsageMeter | None = None
     """**本次跑批**的 LLM 用量(已对计量器做差)。
     为空表示这次没用模型(例如 ReferenceGenerator 基线)。"""
+
+    prompt_fingerprint: str = ""
+    """这次跑批所用上下文的指纹。见 :meth:`AnswerLoop.prompt_fingerprint`。"""
 
     # -- 指标 --------------------------------------------------------------
     @property
@@ -144,6 +152,29 @@ class EvalReport:
     def failures(self) -> tuple[CaseResult, ...]:
         return tuple(r for r in self.results if not r.correct)
 
+    # -- 训练集 / 留出集 ------------------------------------------------------
+    # 「准确率」把可答题的执行比对与不可答题的正确拒答合在一起算:
+    # 改进循环的目标是整体答对,单看其中一类都会被另一类的捷径钻空子。
+    @property
+    def train(self) -> tuple[CaseResult, ...]:
+        return tuple(r for r in self.results if not r.holdout)
+
+    @property
+    def accuracy(self) -> float:
+        return _ratio([r for r in self.results if r.correct], self.results)
+
+    @property
+    def train_correct(self) -> int:
+        return sum(1 for r in self.train if r.correct)
+
+    @property
+    def train_accuracy(self) -> float:
+        return _ratio([r for r in self.train if r.correct], self.train)
+
+    @property
+    def holdout_accuracy(self) -> float:
+        return _ratio([r for r in self.holdout if r.correct], self.holdout)
+
     @property
     def model(self) -> str:
         """实际应答的模型。
@@ -183,11 +214,17 @@ class EvalReport:
             "cached_calls": self.usage.cached_calls if self.usage else 0,
             "total_tokens": self.usage.total_tokens if self.usage else self.total_tokens,
             "notes": notes,
+            "prompt_fingerprint": self.prompt_fingerprint,
+            "train_accuracy": self.train_accuracy,
+            "holdout_accuracy": self.holdout_accuracy,
         }
 
     def summary(self) -> str:
         return (
-            f"run {self.run_id} · {self.generator} · knowledge {self.knowledge_version}\n"
+            f"run {self.run_id} · {self.generator} · knowledge {self.knowledge_version}"
+            f" · prompt {self.prompt_fingerprint or '-'}\n"
+            f"  accuracy (train)    {self.train_accuracy:6.1%}   ({self.train_correct}/{len(self.train)})\n"
+            f"  accuracy (holdout)  {self.holdout_accuracy:6.1%}\n"
             f"  pass@1              {self.pass_at_1:6.1%}\n"
             f"  pass (final)        {self.pass_final:6.1%}\n"
             f"  holdout pass        {self.holdout_pass_final:6.1%}\n"
@@ -197,6 +234,18 @@ class EvalReport:
             f"  false refusal       {self.false_refusal_rate:6.1%}"
             + (f"\n  {self.usage.summary()}" if self.usage else "")
         )
+
+
+def _last_feedback(outcome: LoopOutcome) -> str:
+    if not outcome.attempts:
+        return ""
+    last = outcome.attempts[-1]
+    parts = [*last.guard_messages, *last.context_messages]
+    if last.execution_error:
+        parts.append(last.execution_error)
+    if last.generation_error:
+        parts.append(last.generation_error)
+    return " | ".join(parts)
 
 
 def _ratio(subset: Sequence[Any], whole: Sequence[Any]) -> float:
@@ -244,6 +293,14 @@ class Evaluator:
     循环捕获成 ``generator_error``,整批评估不会中断 —— 但后续 case 会全部失败,
     报告里能一眼看出是熔断而不是模型退步。"""
     _goldens: dict[str, Golden] = field(default_factory=dict, repr=False)
+
+    def with_loop(self, loop: AnswerLoop) -> "Evaluator":
+        """换一个循环(例如候选知识版本),**复用已算好的标准答案**。
+
+        标准答案只取决于数据和评估集,与模型/提示无关。每试一个候选就重算一遍,
+        等于每轮多扫 22 次仓库 —— Free Edition 的配额经不起。
+        """
+        return replace(self, loop=loop, _goldens=self.goldens())
 
     def goldens(self) -> dict[str, Golden]:
         """程序化生成全部标准答案(带缓存)。"""
@@ -304,6 +361,8 @@ class Evaluator:
                     tags=tuple(case.tags),
                     model=outcome.model,
                     tokens=outcome.total_tokens,
+                    last_sql=outcome.attempts[-1].sql if outcome.attempts else "",
+                    last_feedback=_last_feedback(outcome),
                 )
             )
             attempts.extend(
@@ -316,6 +375,7 @@ class Evaluator:
             knowledge_version=knowledge_version,
             created_at=created_at,
             results=tuple(results),
+            prompt_fingerprint=self.loop.prompt_fingerprint(),
             usage=(
                 self.usage.delta_from(usage_before)
                 if self.usage is not None and usage_before is not None

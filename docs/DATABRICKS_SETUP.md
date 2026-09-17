@@ -15,6 +15,7 @@
 5. [跑分解(notebook `01_decompose`)](#5-跑分解)
 6. [出具验收证据(notebook `02_run_tests`)](#6-出具验收证据)
 7. [跑循环主线(notebook `03_nl2sql_loop`)](#7-跑循环主线)
+7b. [跑自主改进循环(notebook `04_improvement_loop`)](#7b-跑自主改进循环)
 8. [纯 SQL 路线(不用 notebook)](#8-纯-sql-路线)
 9. [建 Job:把循环挂上定时](#9-建-job)
 10. [排查表](#10-排查表)
@@ -204,8 +205,8 @@ sessions_converted   14416          ← 必须与上一行相等
 **期望看到:**
 
 ```
-157 passed, 1 skipped     ← 第 1 段:离线部分
-85 passed, 1 skipped      ← 第 2 段:跑在 Spark 上
+168 passed, 1 skipped     ← 第 1 段:离线部分
+119 passed, 1 skipped     ← 第 2 段:跑在 Spark 上
 因子分解残差      -1.074e-12 %   (要求 < 0.1%)
 维度分解最大残差   1.440e-13 %   (要求 < 0.1%)
 ```
@@ -357,6 +358,41 @@ databricks secrets list-secrets llm
 
 项目给智谱预设了 `do_sample=false`(贪婪解码)。评估要求同一个 prompt 两次得到同一个答案,
 否则指标的涨跌无法归因到任何一次改动。
+
+## 7b. 跑自主改进循环
+
+前提:`00_setup` 跑过;`03` 里的 LLM 接入(第 7.5 节)已经走通。
+
+打开 `notebooks/04_improvement_loop.py`。顶部组件默认值就能用
+(`llm_provider=zhipu`、最多 4 轮、连续 2 轮不采纳即停、目标准确率 0.9、调用上限 400)。
+
+1. 右上角 **Connect → Serverless**
+2. **Run all**
+3. 第 4 节「运行自主改进循环」那一格要 **15~25 分钟**,期间每结束一轮会打印一行:
+
+```
+── 第 1 轮  ✓ 采纳  训练集 71.4% · 留出集 80.0%
+   提示:Use the market column for country codes (US, UK, DE); region only holds NA/EMEA.
+   原因:训练集 13 → 15 道,留出集 60.0% → 80.0%
+── 第 2 轮  ✗ 拒绝  训练集 71.4% · 留出集 80.0%
+   提示:...
+   原因:训练集没有多答对:15 → 15(共 21 道)
+```
+
+跑完看三样东西:
+
+| 格子 | 看什么 |
+|---|---|
+| 5. 迭代曲线 | 第 0 行基线,之后每轮一行,**含被拒绝的** |
+| 6. 台账 | `nl2sql_improvement_ledger` 里每个候选的指标前后对比与裁决原因 |
+| 8. 提议者的 prompt | 确认里面**没有** `holdout_` 开头的题、**没有**参考 SQL |
+
+**再跑一次 04** 会发生什么:上一次被拒绝的提示会出现在提议者的 prompt 里
+(第 3 节会打印「以往被拒绝过的提示:N 条」),它不会再提同样的东西 ——
+这就是跨循环的记忆。
+
+想保留被采纳的提示:取消最后一格的注释运行,写回 `knowledge/nl2sql/prompting.yaml`,
+然后在 Git folder 界面 commit & push。
 
 ---
 

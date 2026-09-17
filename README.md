@@ -13,14 +13,31 @@ L2 评估（每次改动后）                                    ★ 项目核�
       26 条 case → 执行式比对 → pass@1 / 幻觉率 / 拒答准确率
       标准答案由知识库**程序化生成**，不手工标注
 
-L3 改进（跨版本）                                        ★ 项目核心
-      失败归因 → 补 few-shot / 提示（带来历）→ 版本 +1
-      → 重跑评估 + 留出集 → 指标不退步才允许合并 → 下一轮生成读到新知识
+L3 自主改进（跨版本，无人值守）                          ★ 项目核心
+      读训练集失败 + 台账里被拒绝过的提示 → LLM 提议一条通用提示
+      → 带着它重跑评估 → 确定性闸门裁决（训练集多对 ≥1 道、留出集不退步）
+      → 采纳则版本 +1；拒绝则连同原因记进台账 → 下一轮提议时读到
 ```
 
 判据很硬:**一个循环之所以成立,在于「下一轮会读取上一轮写下的状态」。**
-只写不读的定时任务是复读机,不是循环。在这里,这句话的落点是两张 append-only 的
-Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs`)和一个有版本的提示知识库。
+只写不读的定时任务是复读机,不是循环。在这里,这句话的落点是三张 append-only 的
+Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs` / `nl2sql_improvement_ledger`)
+和一个有版本的提示知识库。
+
+**LLM 负责提议,确定性闸门负责裁决。** 提议者看不到留出集,也看不到参考 SQL;
+被拒绝的提示跨循环记住,不会被反复尝试。
+
+## 真实跑出来的数字(glm-4-flash,Databricks Free Edition)
+
+| 轮次 | 改动 | 最终准确率 | 首轮准确率 | 留出集 | 发现 |
+|---|---|---|---|---|---|
+| 1 | 基线 | 0% | 0% | 0% | 22 道题 SQL 跑通但返回空:模型用 `CURRENT_DATE()` 查了 2026 年,数据在 2025 年 |
+| 2 | + 报告日历(只改上下文) | **63.6%** | 50.0% | 50.0% | 自修复贡献 +13.6 个百分点;剩余错误中 5 道是维度取值写错(`market='Germany'`) |
+| 3+ | + 维度取值检查 + 自主改进循环 | 见 `notebooks/04` 的迭代曲线 | | | |
+
+第 1 轮还暴露了评估系统自身的三个问题:回归闸门拿「永远正确」的参考生成器当基线、
+守卫在 DuckDB 方言下把 `DATEADD(day,…)` 的 `day` 误判为幻觉列、
+以及模型把拒答包进 ```sql 代码块时被误判为「该拒答没拒答」。三个都修了,并各有回归测试。
 
 ---
 
@@ -71,8 +88,9 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs`)和一个有版本的提示知�
 |---|---|---|
 | `notebooks/00_setup.py` | 建 5 张表 + 灌 8 周样例数据 + 自检 | `sessions_converted == completed_orders` |
 | `notebooks/01_decompose.py` | 确定性分解 + 闭合性断言 | 残差 ~`1e-12 %` |
-| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `157 passed` + `85 passed`(各 1 条 duckdb 专用被跳过) |
+| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `168 passed` + `119 passed`(各 1 条 duckdb 专用被跳过) |
 | `notebooks/03_nl2sql_loop.py` | **循环主线**:自修复 → 评估 → 改进 → 回归闸门 | `nl2sql_eval_runs` 里的指标序列 |
+| `notebooks/04_improvement_loop.py` | **自主改进循环**:LLM 提议 → 试跑 → 闸门裁决 → 台账,无人值守迭代 | 逐轮迭代曲线 + `nl2sql_improvement_ledger` |
 
 `03` 的第 2 格会**自动探测你的 workspace 有没有可用的 LLM 端点**,有就直接用
 (走 workspace 内的 serving 端点,请求不出 Databricks)。没有也能跑完整条流水线 ——
@@ -107,7 +125,8 @@ pytest -q --rca-target=databricks  # 从本机连 warehouse
 | **LLM 客户端** `nl2sql/llm.py` | 退避重试、prompt 缓存、预算熔断、用量计量 | 让传输层重试被记成一次「自修复尝试」 |
 | **守卫** `nl2sql/guard.py` | 确定性静态校验:只读、表/列白名单、幻觉检测 | 使用 LLM |
 | **比对器** `nl2sql/compare.py` | 执行式比对(比结果集,不比 SQL 文本) | 使用 LLM |
-| **改进循环** `nl2sql/knowledge_store.py` | 修改**知识**(提示、few-shot) | 修改代码逻辑 |
+| **改进循环** `nl2sql/improve.py` | LLM 提议提示;确定性闸门裁决;台账记住每次尝试 | 看留出集、看参考 SQL、修改代码逻辑 |
+| **取值检查** `nl2sql/domains.py` | 从仓库查出维度列实际取值,拦下 `market='Germany'` 并反馈真实取值 | 使用 LLM |
 
 **守卫为什么不能省。** LLM 生成的文本会被送进仓库执行,`DROP` 必须在执行前拦掉。
 但它更重要的作用是**给出可照着改的反馈**:
@@ -257,6 +276,8 @@ gmv-rca-agent/
 │   │   ├── loop.py             #     L1 自修复内循环
 │   │   ├── evaluate.py         #     L2 指标 + 回归闸门
 │   │   ├── knowledge_store.py  #     L3 提示知识(有版本、有来历)
+│   │   ├── improve.py          #     ★ L3 自主改进循环:提议 / 试跑 / 裁决 / 台账
+│   │   ├── domains.py          #     维度取值检查(L1 的上下文反馈)
 │   │   └── state.py            #     Delta 状态表:下一轮读上一轮写的
 │   ├── knowledge.py            # 加载 + 校验(含乘法恒等式的符号验证)
 │   ├── decompose.py            # 确定性分解 —— 同时是评估集的答案发生器
@@ -271,7 +292,8 @@ gmv-rca-agent/
 │   ├── 00_setup.py             #   建表 + 灌数 + 自检
 │   ├── 01_decompose.py         #   确定性分解 + 闭合性断言
 │   ├── 02_run_tests.py         #   在 Databricks 上跑整套验收测试
-│   └── 03_nl2sql_loop.py       # ★ 循环主线
+│   ├── 03_nl2sql_loop.py       # ★ 循环主线
+│   └── 04_improvement_loop.py  # ★ 自主改进循环
 ├── docs/
 │   ├── CASE_STUDY.md           # ★ 场景题 + 设计思路 + 技术栈取舍 + 架构
 │   └── DATABRICKS_SETUP.md     # ★ 平台操作手册(点哪里、跑什么、怎么排查)
@@ -291,6 +313,7 @@ gmv-rca-agent/
     ├── test_llm.py                 # ★ 重试 / 缓存 / 预算 / 凭据不泄漏
     ├── test_nl2sql_units.py        # ★ 守卫 / 比对器 / 评估集 / 改进 / 回归闸门
     ├── test_nl2sql_loop.py         # ★ 自修复、评估器自检、状态表、改进闭环
+    ├── test_improve.py             # ★ 自主循环:采纳/拒绝/重复、留出集不可见、跨循环记忆
     └── conftest.py                 #   --rca-target 决定整套测试跑在哪个引擎上
 ```
 
@@ -307,7 +330,7 @@ gmv-rca-agent/
 | 5 | 全程不使用 LLM | 全仓无任何模型调用 | ✅ |
 
 ```
-253 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
+298 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
 ```
 
 ⚠ **尚未在真实 workspace 上执行过。** 第 3 层验证的代码已就位

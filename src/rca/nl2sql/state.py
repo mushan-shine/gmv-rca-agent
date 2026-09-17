@@ -30,6 +30,7 @@ from ..warehouse import SqlExecutor
 
 ATTEMPTS_TABLE = "nl2sql_attempts"
 EVAL_RUNS_TABLE = "nl2sql_eval_runs"
+LEDGER_TABLE = "nl2sql_improvement_ledger"
 
 # 列名 -> 逻辑类型。顺序即建表顺序,也是 INSERT 的列顺序。
 ATTEMPTS_SCHEMA: dict[str, str] = {
@@ -73,7 +74,40 @@ EVAL_RUNS_SCHEMA: dict[str, str] = {
     "cached_calls": "int",
     "total_tokens": "int",
     "notes": "string",
+    # ---- 以下为后加的列:旧表会被 ensure_tables() 自动补齐 ----
+    "prompt_fingerprint": "string",
+    "train_accuracy": "double",
+    "holdout_accuracy": "double",
 }
+
+LEDGER_SCHEMA: dict[str, str] = {
+    "loop_id": "string",
+    "round": "int",
+    "decision": "string",
+    "hint": "string",
+    "rationale": "string",
+    "targets": "string",
+    "reasons": "string",
+    "parent_version": "string",
+    "candidate_version": "string",
+    "baseline_run_id": "string",
+    "trial_run_id": "string",
+    "train_before": "double",
+    "train_after": "double",
+    "holdout_before": "double",
+    "holdout_after": "double",
+    "hallucination_after": "double",
+    "false_refusal_after": "double",
+    "prompt_fingerprint": "string",
+    "proposer": "string",
+    "generator": "string",
+    "knowledge_json": "string",
+    "created_at": "timestamp",
+}
+"""自主改进循环的台账:**每一个候选**(采纳的、拒绝的、重复的)都记一行。
+
+被拒绝的候选是这张表最重要的内容 —— 下一次提议时读到它们,就不会反复提同一个无效修改。
+这是「下一轮读取上一轮写下的状态」最直接的落点。"""
 
 
 def _literal(value: Any, logical_type: str, dialect: SqlDialect) -> str:
@@ -138,12 +172,32 @@ class StateStore:
 
     # -- 建表 --------------------------------------------------------------
     def ensure_tables(self) -> None:
-        """建表(已存在则什么都不做)。**绝不 DROP** —— 循环的记忆在这里。"""
+        """建表并补齐缺失的列。**绝不 DROP** —— 循环的记忆在这里。
+
+        ``CREATE TABLE IF NOT EXISTS`` 不会更新已有表的结构。代码里给状态表加了列,
+        workspace 里的旧表不跟着变,下一次 INSERT 就会失败。所以建表之后
+        逐表比对列,缺的用 ``ALTER TABLE ... ADD`` 补上;旧行的新列为 NULL。
+        """
         for table, schema in (
             (ATTEMPTS_TABLE, ATTEMPTS_SCHEMA),
             (EVAL_RUNS_TABLE, EVAL_RUNS_SCHEMA),
+            (LEDGER_TABLE, LEDGER_SCHEMA),
         ):
             self.executor.run(_create_table_sql(table, schema, self.dialect))
+            existing = self._existing_columns(table)
+            for column, logical in schema.items():
+                if column not in existing:
+                    self.executor.run(self.dialect.add_column_sql(table, column, logical))
+
+    def _existing_columns(self, table: str) -> set[str]:
+        rows = self.executor.run(f"DESCRIBE {self.dialect.qualify(table)}")
+        names: set[str] = set()
+        for row in rows:
+            # Databricks 返回 col_name(并夹带以 # 开头的分区说明行);DuckDB 返回 column_name
+            name = row.get("col_name", row.get("column_name"))
+            if name and not str(name).startswith("#"):
+                names.add(str(name).strip().lower())
+        return names
 
     # -- 写 ----------------------------------------------------------------
     def record_attempts(self, rows: Sequence[Mapping[str, Any]]) -> int:
@@ -154,6 +208,29 @@ class StateStore:
         stamped = [{**row, "created_at": row.get("created_at") or now} for row in rows]
         self.executor.run(_insert_sql(ATTEMPTS_TABLE, ATTEMPTS_SCHEMA, stamped, self.dialect))
         return len(stamped)
+
+    def record_ledger(self, row: Mapping[str, Any]) -> None:
+        stamped = {**row, "created_at": row.get("created_at") or datetime.now(timezone.utc)}
+        self.executor.run(_insert_sql(LEDGER_TABLE, LEDGER_SCHEMA, [stamped], self.dialect))
+
+    def rejected_hints(self, generator: str, limit: int = 50) -> list[dict[str, Any]]:
+        """这个生成器(模型)**以往所有改进循环**里被拒绝过的提示,及拒绝原因。
+
+        按生成器过滤:对一个模型无效的提示,对另一个模型未必无效。
+        """
+        return self.executor.run(
+            f"SELECT hint, reasons, loop_id, round FROM {self.dialect.qualify(LEDGER_TABLE)}"
+            f" WHERE decision = 'rejected' AND hint <> ''"
+            f"   AND generator = {SqlDialect.string_literal(generator)}"
+            f" ORDER BY created_at DESC LIMIT {int(limit)}"
+        )
+
+    def ledger(self, loop_id: str) -> list[dict[str, Any]]:
+        return self.executor.run(
+            f"SELECT * FROM {self.dialect.qualify(LEDGER_TABLE)}"
+            f" WHERE loop_id = {SqlDialect.string_literal(loop_id)}"
+            f" ORDER BY round, created_at"
+        )
 
     def record_eval_run(self, row: Mapping[str, Any]) -> None:
         stamped = {**row, "created_at": row.get("created_at") or datetime.now(timezone.utc)}

@@ -91,6 +91,10 @@ class SqlDialect(ABC):
     def cast_string(self, expr: str) -> str:
         return f"CAST({expr} AS {self.type_sql('string')})"
 
+    @abstractmethod
+    def add_column_sql(self, table: str, column: str, logical_type: str) -> str:
+        """给已存在的表加一列。状态表的结构演进靠它。"""
+
 
 class DatabricksDialect(SqlDialect):
     """Databricks SQL Warehouse(Unity Catalog + Delta)。"""
@@ -136,6 +140,9 @@ class DatabricksDialect(SqlDialect):
     def date_shift(self, date_expr: str, days_expr: str) -> str:
         return f"date_add({date_expr}, {days_expr})"
 
+    def add_column_sql(self, table: str, column: str, logical_type: str) -> str:
+        return f"ALTER TABLE {self.qualify(table)} ADD COLUMNS ({column} {self.type_sql(logical_type)})"
+
 
 class DuckDBDialect(SqlDialect):
     """本地 DuckDB(仅用于开发与测试)。"""
@@ -180,6 +187,9 @@ class DuckDBDialect(SqlDialect):
 
     def date_shift(self, date_expr: str, days_expr: str) -> str:
         return f"({date_expr} + CAST({days_expr} AS INTEGER))"
+
+    def add_column_sql(self, table: str, column: str, logical_type: str) -> str:
+        return f"ALTER TABLE {self.qualify(table)} ADD COLUMN {column} {self.type_sql(logical_type)}"
 
 
 def _lookup(mapping: dict[str, str], logical_type: str) -> str:

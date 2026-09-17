@@ -47,6 +47,7 @@ from .generate import (
     render_reporting_calendar,
     render_schema,
 )
+from .domains import ValueDomains
 from .guard import GuardReport, SqlGuard
 
 _WALL_CLOCK = re.compile(
@@ -91,6 +92,10 @@ class Attempt:
     sql: str
     fingerprint: str
     guard_messages: tuple[str, ...] = ()
+    context_messages: tuple[str, ...] = ()
+    """依赖运行上下文的确定性检查(报告日历、维度取值)给出的反馈。
+    SQL 本身合法、能跑,但放在这份数据上必然答错。"""
+
     hallucinated: bool = False
     execution_error: str | None = None
     generation_error: str | None = None
@@ -110,6 +115,7 @@ class Attempt:
         return (
             not self.refused
             and not self.guard_messages
+            and not self.context_messages
             and self.execution_error is None
             and self.generation_error is None
         )
@@ -125,6 +131,8 @@ class Attempt:
             return "hallucination"
         if self.guard_messages:
             return "guard"
+        if self.context_messages:
+            return "context"
         if self.execution_error is not None:
             return "execution"
         return "none"
@@ -187,6 +195,10 @@ class AnswerLoop:
     """报告日期(「今天」)。设了之后,prompt 里会带报告日历,
     并且 SQL 里引用真实世界时钟(``CURRENT_DATE`` / ``NOW()``)会被当成可修复的错误。"""
 
+    value_domains: ValueDomains | None = None
+    """维度列的实际取值。设了之后,``market = 'Germany'`` 这类必然查空的过滤会在执行前被拦下,
+    并反馈实际取值。见 :mod:`rca.nl2sql.domains`。"""
+
     _schema_text: str = field(default="", repr=False)
     _calendar: tuple[str, ...] = field(default=(), repr=False)
 
@@ -197,6 +209,24 @@ class AnswerLoop:
             self.hints = tuple(render_metric_glossary(self.knowledge))
         self._schema_text = render_schema(self.knowledge, self.dialect)
         self._calendar = render_reporting_calendar(self.as_of) if self.as_of else ()
+
+    def prompt_fingerprint(self, dialect_name: str = "Databricks SQL") -> str:
+        """这一轮生成所用上下文的指纹(schema + 提示 + 示例 + 报告日历 + 规则)。
+
+        真实踩过的坑:补报告日历前后两次评估,``knowledge_version`` 都记成 v1,
+        准确率从 0% 变成 63.6%,只看状态表完全看不出为什么。
+        指纹不同 = 模型看到的上下文不同;指纹相同而指标变了,才去怀疑模型本身。
+        """
+        from .generate import build_prompt
+
+        template = build_prompt(self.initial_context("<question>"), dialect_name)
+        # 不在 prompt 里、但同样改变行为的循环配置也要进指纹:
+        # 维度取值检查开没开、最多几轮 —— 否则开了取值检查之后指标变好,指纹却没变。
+        settings = (
+            f"|max_attempts={self.max_attempts}"
+            f"|value_domains={sorted(self.value_domains.values) if self.value_domains else None}"
+        )
+        return sql_fingerprint(template + settings)
 
     def initial_context(self, question: str) -> PromptContext:
         return PromptContext(
@@ -214,13 +244,16 @@ class AnswerLoop:
         违反它的 SQL 语法正确、执行成功、返回 NULL —— 不在这里拦下,
         L1 永远发现不了,只能等 L2 评估时才暴露。
         """
-        if self.as_of is None or not _WALL_CLOCK.search(sql):
-            return ()
-        return (
-            "SQL 用了 CURRENT_DATE / NOW() 等真实世界的当前时间,但数据是历史快照,"
-            "这样会查到空集。请改用报告日历(Reporting calendar)里给出的具体日期,"
-            "写成 dt BETWEEN DATE 'YYYY-MM-DD' AND DATE 'YYYY-MM-DD'。",
-        )
+        messages: list[str] = []
+        if self.as_of is not None and _WALL_CLOCK.search(sql):
+            messages.append(
+                "SQL 用了 CURRENT_DATE / NOW() 等真实世界的当前时间,但数据是历史快照,"
+                "这样会查到空集。请改用报告日历(Reporting calendar)里给出的具体日期,"
+                "写成 dt BETWEEN DATE 'YYYY-MM-DD' AND DATE 'YYYY-MM-DD'。"
+            )
+        if self.value_domains is not None:
+            messages.extend(self.value_domains.check(sql, dialect=self.dialect.name))
+        return tuple(messages)
 
     def answer(self, question: str) -> LoopOutcome:
         """回答一个问题,必要时自我修复。
@@ -312,7 +345,8 @@ class AnswerLoop:
                         attempt_no=attempt_no,
                         sql=sql,
                         fingerprint=sql_fingerprint(sql) if sql else "",
-                        guard_messages=messages,
+                        guard_messages=report.messages,
+                        context_messages=context_messages,
                         hallucinated=report.hallucinated,
                         latency_ms=_elapsed_ms(started),
                         **usage,
@@ -413,7 +447,7 @@ def attempt_rows(
             "fingerprint": attempt.fingerprint,
             "failure_kind": attempt.failure_kind,
             "model": attempt.model,
-            "guard_errors": " | ".join(attempt.guard_messages),
+            "guard_errors": " | ".join(attempt.guard_messages + attempt.context_messages),
             "execution_error": attempt.execution_error or "",
             "generation_error": attempt.generation_error or "",
             "row_count": attempt.row_count if attempt.row_count is not None else -1,

@@ -634,8 +634,8 @@ def test_wall_clock_sql_is_repaired_using_the_reporting_calendar(make_loop, targ
 
     assert outcome.status is Status.ANSWERED
     assert outcome.attempts_used == 2
-    assert outcome.attempts[0].failure_kind == "guard"
-    assert "CURRENT_DATE" in " ".join(outcome.attempts[0].guard_messages)
+    assert outcome.attempts[0].failure_kind == "context"
+    assert "CURRENT_DATE" in " ".join(outcome.attempts[0].context_messages)
     assert outcome.rows and outcome.rows[0]["v"] is not None
 
 
