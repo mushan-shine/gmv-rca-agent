@@ -45,7 +45,7 @@ def test_databricks_script_uses_databricks_syntax():
     assert "USING DELTA" in sql
     assert "explode(sequence(" in sql
     assert "pmod(hash(" in sql
-    assert "main.gmv_rca.fact_orders" in sql
+    assert "workspace.gmv_rca.fact_orders" in sql
     # 绝不能混进 DuckDB 的写法
     assert "unnest(generate_series" not in sql
     assert "::DOUBLE" not in sql

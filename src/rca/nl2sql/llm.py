@@ -5,6 +5,7 @@
 * Databricks Foundation Model APIs / Model Serving
   (``https://<workspace>/serving-endpoints``)
 * OpenAI (``https://api.openai.com/v1``)
+* 智谱开放平台 (``https://open.bigmodel.cn/api/paas/v4``,GLM-4-Flash 免费)
 * 各类 OpenAI 兼容端点(自建代理、vLLM、Anthropic 的兼容层)
 
 于是换供应商只是换 ``base_url`` + ``model``,不引第三方 SDK ——
@@ -87,6 +88,15 @@ class LlmResponse:
     @property
     def total_tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def filtered(self) -> bool:
+        """回复被供应商的内容安全策略拦截(智谱返回 ``finish_reason="sensitive"``)。
+
+        被拦截的回复通常是空的。不单独识别的话,它会被当成「模型没写出 SQL」,
+        自修复循环会徒劳地让模型「把 SQL 放进代码块」。
+        """
+        return self.finish_reason in {"sensitive", "content_filter"}
 
     @property
     def truncated(self) -> bool:
@@ -210,6 +220,8 @@ class OpenAIChatClient:
     max_retries: int = DEFAULT_MAX_RETRIES
     system_prompt: str = ""
     extra_headers: Mapping[str, str] = field(default_factory=dict)
+    extra_body: Mapping[str, Any] = field(default_factory=dict)
+    """供应商特有的请求字段,原样并入请求体。例如智谱的 ``{"do_sample": False}``。"""
 
     def __repr__(self) -> str:  # 防止 key 出现在异常栈里
         return (
@@ -223,6 +235,8 @@ class OpenAIChatClient:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "system_prompt": self.system_prompt,
+            # 进缓存键:do_sample 开/关的回复不能互相冒充
+            "extra_body": json.dumps(dict(self.extra_body), sort_keys=True),
         }
 
     def _endpoint(self) -> str:
@@ -238,6 +252,7 @@ class OpenAIChatClient:
             "messages": messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            **dict(self.extra_body),
         }
 
     def complete(self, prompt: str) -> LlmResponse:
@@ -407,10 +422,21 @@ ENV_API_KEY = "RCA_LLM_API_KEY"
 ENV_MAX_CALLS = "RCA_LLM_MAX_CALLS"
 ENV_MAX_TOKENS = "RCA_LLM_MAX_TOKENS"
 
-PROVIDERS = ("databricks", "openai", "custom")
+PROVIDERS = ("databricks", "zhipu", "openai", "custom")
 
 DEFAULT_DATABRICKS_MODEL = "databricks-meta-llama-3-3-70b-instruct"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
+ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+DEFAULT_ZHIPU_MODEL = "glm-4-flash"
+"""智谱开放平台的免费模型。"""
+
+ZHIPU_EXTRA_BODY: dict[str, Any] = {"do_sample": False}
+"""智谱的贪婪解码开关。
+
+``do_sample=False`` 时 temperature / top_p 不生效,模型走确定性解码 ——
+评估要求同一个 prompt 两次得到同一个答案,否则指标的涨跌无法归因。
+"""
 
 
 def build_chat_client(
@@ -422,10 +448,11 @@ def build_chat_client(
     """按环境变量装配一个客户端。
 
     ============================  =================================================
-    ``RCA_LLM_PROVIDER``          ``databricks``(默认) / ``openai`` / ``custom``
+    ``RCA_LLM_PROVIDER``          ``databricks``(默认) / ``zhipu`` / ``openai`` / ``custom``
     ``RCA_LLM_MODEL``             endpoint 名或模型名
     ``RCA_LLM_BASE_URL``          ``custom`` 必填;另两者可覆盖默认推导
-    ``RCA_LLM_API_KEY``           凭据;``databricks`` 下缺省用 ``DATABRICKS_TOKEN``
+    ``RCA_LLM_API_KEY``           凭据;``databricks`` 缺省用 ``DATABRICKS_TOKEN``,
+                                  ``zhipu`` 缺省用 ``ZHIPUAI_API_KEY``
     ============================  =================================================
 
     ``databricks`` 的 base_url 由 ``DATABRICKS_SERVER_HOSTNAME`` 推导成
@@ -468,6 +495,18 @@ def build_chat_client(
             raise LlmConfigError(
                 f"provider=databricks 需要 {ENV_TOKEN}(或 {ENV_API_KEY})。"
             )
+    elif provider == "zhipu":
+        model = model or DEFAULT_ZHIPU_MODEL
+        base_url = base_url or ZHIPU_BASE_URL
+        api_key = api_key or env.get("ZHIPUAI_API_KEY", "")
+        overrides.setdefault("extra_body", dict(ZHIPU_EXTRA_BODY))
+        if not api_key:
+            raise LlmConfigError(
+                f"provider=zhipu 需要 {ENV_API_KEY} 或 ZHIPUAI_API_KEY。\n"
+                f"在 https://open.bigmodel.cn 控制台的「API Keys」页面创建。\n"
+                f"⚠ 请求会出站到 open.bigmodel.cn,Databricks Free Edition 可能连不上 —— "
+                f"先用 check_connectivity() 确认。"
+            )
     elif provider == "openai":
         model = model or DEFAULT_OPENAI_MODEL
         base_url = base_url or "https://api.openai.com/v1"
@@ -500,3 +539,27 @@ def build_usage_meter(env: Mapping[str, str] | None = None) -> UsageMeter:
         return int(raw) if raw and raw.strip().isdigit() else None
 
     return UsageMeter(max_calls=_int(ENV_MAX_CALLS), max_tokens=_int(ENV_MAX_TOKENS))
+
+
+def check_connectivity(base_url: str, timeout: float = 10.0) -> tuple[bool, str]:
+    """检查当前运行环境能否连到 ``base_url`` 所在的主机。
+
+    **只要拿到任何 HTTP 响应就算连通** —— 包括 401 / 404,那说明网络是通的,
+    只是请求本身不对。只有 DNS 失败、连接被拒、超时才算不通。
+
+    为什么需要它:Databricks Free Edition 限制出站网络。连不上外部模型时,
+    自修复循环会把每条 case 都记成 ``generator_error`` —— 看起来像模型全挂了,
+    其实是网络。先查清楚,免得白跑一批评估。
+
+    Returns:
+        ``(是否连通, 说明)``。说明里不包含任何凭据。
+    """
+    request = urllib.request.Request(base_url.rstrip("/") + "/", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return True, f"连通(HTTP {response.status})"
+    except urllib.error.HTTPError as exc:
+        return True, f"连通(HTTP {exc.code},网络可达)"
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        return False, f"连不上:{type(exc).__name__}: {reason}"

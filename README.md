@@ -71,7 +71,7 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs`)和一个有版本的提示知�
 |---|---|---|
 | `notebooks/00_setup.py` | 建 5 张表 + 灌 8 周样例数据 + 自检 | `sessions_converted == completed_orders` |
 | `notebooks/01_decompose.py` | 确定性分解 + 闭合性断言 | 残差 ~`1e-12 %` |
-| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `243 passed` |
+| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `157 passed` + `85 passed`(各 1 条 duckdb 专用被跳过) |
 | `notebooks/03_nl2sql_loop.py` | **循环主线**:自修复 → 评估 → 改进 → 回归闸门 | `nl2sql_eval_runs` 里的指标序列 |
 
 `03` 的第 2 格会**自动探测你的 workspace 有没有可用的 LLM 端点**,有就直接用
@@ -79,7 +79,7 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs`)和一个有版本的提示知�
 生成器换成 `ReferenceGenerator`,其余完全一样。
 
 换供应商只是换 `base_url` + `model`:客户端只认 OpenAI chat-completions 线格式,
-Databricks / OpenAI / 自建代理都讲这个。配置见 [.env.example](.env.example)。
+Databricks / 智谱 GLM / OpenAI / 自建代理都讲这个。配置见 [.env.example](.env.example);notebook 里用顶部的 `llm_provider` 下拉框切换,接智谱的步骤见 [DATABRICKS_SETUP.md 第 7.5 节](docs/DATABRICKS_SETUP.md)。
 
 ### 三种运行形态,SQL 完全相同
 
@@ -307,7 +307,7 @@ gmv-rca-agent/
 | 5 | 全程不使用 LLM | 全仓无任何模型调用 | ✅ |
 
 ```
-243 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
+253 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
 ```
 
 ⚠ **尚未在真实 workspace 上执行过。** 第 3 层验证的代码已就位

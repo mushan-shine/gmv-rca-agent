@@ -97,7 +97,7 @@ class DatabricksDialect(SqlDialect):
 
     name = "databricks"
 
-    def __init__(self, catalog: str = "main", schema: str = "gmv_rca") -> None:
+    def __init__(self, catalog: str = "workspace", schema: str = "gmv_rca") -> None:
         super().__init__(catalog, schema)
 
     def type_sql(self, logical_type: str) -> str:

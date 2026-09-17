@@ -28,7 +28,7 @@ from rca.sampledata import (
 sqlglot = pytest.importorskip("sqlglot", reason="需要 sqlglot 做静态方言校验")
 from sqlglot.errors import ParseError  # noqa: E402
 
-DATABRICKS = DatabricksDialect(catalog="main", schema="gmv_rca")
+DATABRICKS = DatabricksDialect(catalog="workspace", schema="gmv_rca")
 
 
 def _parse(sql: str, dialect: str, label: str) -> Any:
@@ -93,7 +93,7 @@ def test_factor_decomposition_sql_parses_as_databricks(databricks_engine):
     assert len(executed) == 2, "GMV 因子分解应当只查两张事实表各一次"
     for index, sql in enumerate(executed):
         _parse(sql, "databricks", f"factor_base[{index}]")
-        assert "main.gmv_rca." in sql, "表名必须完全限定到 catalog.schema"
+        assert "workspace.gmv_rca." in sql, "表名必须完全限定到 catalog.schema"
 
 
 @pytest.mark.parametrize(
@@ -123,6 +123,6 @@ def test_join_based_dimension_emits_a_projected_subquery(databricks_engine):
     databricks_engine.decompose_by_dimension("gmv", "user_tier", A, B)
     parts_sql = databricks_engine.executor.executed[-1]
     assert "LEFT JOIN (SELECT" in parts_sql
-    assert "main.gmv_rca.dim_user" in parts_sql
+    assert "workspace.gmv_rca.dim_user" in parts_sql
     assert "_jk" in parts_sql
     _parse(parts_sql, "databricks", "user_tier parts")

@@ -12,6 +12,14 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "pydantic>=2.7" "PyYAML>=6.0"
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -26,7 +34,7 @@ from rca.sampledata import SampleDataConfig
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "main", "Unity Catalog 目录")
+dbutils.widgets.text("catalog", "workspace", "Unity Catalog 目录")
 dbutils.widgets.text("schema", "gmv_rca", "Schema")
 
 knowledge = load_knowledge(REPO_ROOT / "knowledge")

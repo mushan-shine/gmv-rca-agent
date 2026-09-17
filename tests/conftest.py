@@ -28,7 +28,7 @@ from rca.nl2sql.cases import EvalCase, build_reference_sql, load_cases, validate
 from rca.nl2sql.generate import ReferenceGenerator
 from rca.nl2sql.guard import SqlGuard
 from rca.nl2sql.loop import AnswerLoop
-from rca.nl2sql.state import StateStore
+from rca.nl2sql.state import ATTEMPTS_TABLE, EVAL_RUNS_TABLE, StateStore
 from rca.sampledata import SampleDataConfig, build_setup_statements
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +120,11 @@ def target(knowledge: Knowledge, target_name: str, pytestconfig: pytest.Config):
         if not pytestconfig.getoption("--rca-skip-setup"):
             for statement in build_setup_statements(knowledge, built.dialect, TEST_CONFIG):
                 built.executor.run(statement.sql)
+        if target_name != "duckdb":
+            # 状态表在生产里是 append-only 的(循环的记忆),但测试 schema 是一次性的。
+            # 不清掉的话,第二次跑测试时固定 run_id 的记录会重复,聚合断言全部翻倍。
+            for table in (ATTEMPTS_TABLE, EVAL_RUNS_TABLE):
+                built.executor.run(f"DROP TABLE IF EXISTS {built.dialect.qualify(table)}")
         yield built
     finally:
         built.close()

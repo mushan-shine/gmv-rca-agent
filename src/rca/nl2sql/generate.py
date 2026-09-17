@@ -349,6 +349,20 @@ class LlmSqlGenerator:
             "cached": response.cached,
         }
 
+        if response.filtered:
+            # 被供应商的内容安全策略拦下。告诉模型「放进代码块」没有用,
+            # 只能原样说明,由人去看是哪个问题触发了拦截。
+            return Generation(
+                sql="",
+                raw=response.text,
+                model=response.model,
+                error=(
+                    "上一轮回复被模型供应商的内容安全策略拦截,没有返回内容。"
+                    "请只输出一条只读 SQL。"
+                ),
+                **usage,
+            )
+
         if response.truncated:
             # 截断的回复里往往是半条 SQL。让它进守卫会得到一个误导性的语法错,
             # 模型下一轮会去「修」一条本来没写完的 SQL。直接说清楚是被截断了。

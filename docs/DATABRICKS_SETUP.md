@@ -204,7 +204,8 @@ sessions_converted   14416          ← 必须与上一行相等
 **期望看到:**
 
 ```
-243 passed
+157 passed, 1 skipped     ← 第 1 段:离线部分
+85 passed, 1 skipped      ← 第 2 段:跑在 Spark 上
 因子分解残差      -1.074e-12 %   (要求 < 0.1%)
 维度分解最大残差   1.440e-13 %   (要求 < 0.1%)
 ```
@@ -277,6 +278,64 @@ SELECT * FROM <CATALOG>.gmv_rca.nl2sql_eval_runs ORDER BY created_at DESC;
 SELECT * FROM <CATALOG>.gmv_rca.nl2sql_attempts  ORDER BY created_at DESC LIMIT 50;
 ```
 
+### 7.5 接入智谱 GLM(workspace 里没有 Foundation Model 端点时)
+
+智谱开放平台提供 OpenAI 兼容接口,项目的客户端直接支持,默认用免费的 `glm-4-flash`。
+
+**① 拿 API key。** 登录 <https://open.bigmodel.cn> → 右上角头像 → **API Keys** → 新建一个。
+
+**② 把 key 存进 Databricks secret**(不要写进 notebook —— notebook 会进 Git)。
+secret 只能用 Databricks CLI 创建,在**本机**终端执行:
+
+```bash
+winget install Databricks.DatabricksCLI
+```
+
+重开终端,登录你的 workspace(会弹浏览器授权;URL 就是浏览器地址栏里 workspace 的地址):
+
+```bash
+databricks auth login --host https://<你的workspace地址>
+```
+
+```bash
+databricks secrets create-scope llm
+```
+
+```bash
+databricks secrets put-secret llm zhipu_api_key
+```
+
+最后一条会提示你粘贴 key 的值 —— 这样 key 不会留在 shell 历史里。
+确认存进去了(只列名字,不显示值):
+
+```bash
+databricks secrets list-secrets llm
+```
+
+**③ 在 notebook 里切过去。** 打开 `03_nl2sql_loop.py`,顶部下拉框 **`llm_provider`** 选 `zhipu`,
+其余组件保持默认(`zhipu_model=glm-4-flash`、`secret_scope=llm`、`secret_key=zhipu_api_key`),
+然后点第 1 节那一格左边的 ▶ 单独运行。它会依次做三件事:
+
+| 检查 | 通过时的输出 | 失败意味着 |
+|---|---|---|
+| 连通性 | `open.bigmodel.cn:连通(HTTP 401,网络可达)` —— 401 是正常的,说明网络通 | **Free Edition 的出站网络挡住了智谱**。改 key 没用,把输出发给我 |
+| 读 secret | `API key:已从 secret llm/zhipu_api_key 读取` | scope 或 key 名写错,或第 ② 步没做成 |
+| 冒烟测试 | `冒烟测试通过:模型 glm-4-flash · ... ms` | key 无效、额度用完、模型名写错 —— 报错里会有智谱返回的原因 |
+
+三项都过了,再 **Run all**。
+
+**两点要心里有数:**
+
+- **出站网络是最大的不确定项。** Databricks Free Edition 限制 notebook 访问外网,
+  连通性检查不通过就说明被挡了。那种情况下的替代方案是:SQL 仍在 Databricks 上执行,
+  循环本身在本机跑、从本机调智谱 —— 需要的话告诉我,我来加这个入口。
+- **prompt 会离开 workspace。** 发给智谱的是 schema、口径说明和问题文本,
+  **不含任何数据行**(查询结果只在 Databricks 内部比对)。样例数据是合成的,没有隐私问题;
+  但在简历/面试里讲方案时,要把「默认走 workspace 内模型,外部模型是可替换项」这一层说清楚。
+
+项目给智谱预设了 `do_sample=false`(贪婪解码)。评估要求同一个 prompt 两次得到同一个答案,
+否则指标的涨跌无法归因到任何一次改动。
+
 ---
 
 ## 8. 纯 SQL 路线
@@ -285,7 +344,7 @@ SELECT * FROM <CATALOG>.gmv_rca.nl2sql_attempts  ORDER BY created_at DESC LIMIT 
 
 1. 打开 **SQL Editor**
 2. 打开仓库里的 `sql/setup/databricks_setup.sql`,**整段复制**进去
-3. 首行的 `CREATE SCHEMA IF NOT EXISTS main.gmv_rca` 里的 `main` 换成你的 `<CATALOG>`
+3. 脚本默认写入 `workspace.gmv_rca`(Free Edition 的默认 catalog);如果你的 catalog 不叫 `workspace`,把全文的 `workspace.` 换成你的 `<CATALOG>.`
    —— 或者在本地重新渲染一份:
    ```bash
    python sql/setup/render.py --catalog <CATALOG> --schema gmv_rca
@@ -338,7 +397,7 @@ SELECT * FROM <CATALOG>.gmv_rca.nl2sql_attempts  ORDER BY created_at DESC LIMIT 
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|
-| `[SCHEMA_NOT_FOUND]` / `Catalog 'main' not found` | 你的 workspace 默认 catalog 不叫 `main` | 回第 3 步跑 `SHOW CATALOGS`,把 `catalog` 参数换成实际的名字 |
+| `[SCHEMA_NOT_FOUND]` / `Catalog 'workspace' not found` | 你的 workspace 默认 catalog 不叫 `workspace`(项目默认按 Free Edition 设为 `workspace`) | 回第 3 步跑 `SHOW CATALOGS`,把 `catalog` 参数换成实际的名字 |
 | `PERMISSION_DENIED` 建 schema 失败 | 当前用户对该 catalog 没有 `CREATE SCHEMA` 权限 | 换一个有权限的 catalog;Free Edition 一般对默认 catalog 是有权限的 |
 | `ModuleNotFoundError: No module named 'rca'` | notebook 没找到 `src/` | 确认 notebook 在 `notebooks/` 目录下(它靠相对路径定位仓库根);若是直接上传的散文件,手动 `sys.path.insert(0, "<仓库根>/src")` |
 | `ModuleNotFoundError: pydantic` / `yaml` | Runtime 里没有这两个包 | 在 notebook 第一格加 `%pip install pydantic PyYAML`,然后 `dbutils.library.restartPython()` |
@@ -353,6 +412,10 @@ SELECT * FROM <CATALOG>.gmv_rca.nl2sql_attempts  ORDER BY created_at DESC LIMIT 
 | 模型调用报 `HTTP 403 / 404` | 端点名填错,或当前用户对该端点没有查询权限 | 回第 7.1 步看端点列表里的确切名字 |
 | 大量 `generator` 类失败,`generation_error` 写着「被截断」 | `max_tokens` 太小 | 调大装配格里的 `max_tokens`;截断的回复是半条 SQL,修不出来 |
 | 接外部 API 时请求超时/连不上 | Free Edition 出站受限 | 改用 workspace 内的 serving 端点(默认路径) |
+| 智谱连通性检查显示「连不上」 | Free Edition 出站受限,挡住了 `open.bigmodel.cn` | 先把 `llm_provider` 改成 `none` 跑完其余流程;把输出发给我,换成本机跑循环的方式 |
+| 智谱报 `401 令牌已过期或验证不正确` | secret 里的 key 不对或已删除 | 去智谱控制台重新建 key,`databricks secrets put-secret llm zhipu_api_key` 覆盖 |
+| 智谱报 `429` 或额度相关错误 | 免费模型限流/额度用完 | 客户端会自动退避重试;持续出现就隔一段时间再跑,或减少评估 case |
+| `generation_error` 写着「被内容安全策略拦截」 | 智谱对某条问题触发了内容审核 | 记下是哪条 case,发给我看 |
 | `nl2sql_eval_runs` 里只有一行 | 状态表是 append-only,但你只跑过一次 | 再跑一次 `03`;两行之后回归闸门才有基线可比 |
 | Git folder 里 Pull 报认证失败 | Linked accounts 里的 GitHub token 过期或权限不足 | 重新生成一个带 `repo` 权限的 GitHub PAT,回 Settings → Linked accounts 更新 |
 

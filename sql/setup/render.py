@@ -65,7 +65,7 @@ def render(dialect_name: str, catalog: str | None, schema: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dialect", default="databricks", choices=sorted(DIALECTS))
-    parser.add_argument("--catalog", default=None, help="Unity Catalog 目录名(默认 main)")
+    parser.add_argument("--catalog", default=None, help="Unity Catalog 目录名(默认 workspace)")
     parser.add_argument("--schema", default=None, help="Schema 名(默认 gmv_rca)")
     parser.add_argument("--out", default=None, help="输出文件(默认 sql/setup/<dialect>_setup.sql)")
     args = parser.parse_args()
@@ -73,7 +73,7 @@ def main() -> None:
     catalog = args.catalog
     schema = args.schema
     if args.dialect == "databricks":
-        catalog = catalog or "main"
+        catalog = catalog or "workspace"
         schema = schema or "gmv_rca"
     else:
         schema = schema or "main"

@@ -127,6 +127,7 @@ def test_databricks_target_uses_databricks_dialect(monkeypatch):
 
 
 def test_duckdb_target_is_clearly_local():
+    pytest.importorskip("duckdb", reason="Databricks 上不装 duckdb,本地回归才需要")
     target = build_target("duckdb")
     try:
         assert target.dialect.name == "duckdb"

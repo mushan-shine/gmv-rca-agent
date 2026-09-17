@@ -1,7 +1,7 @@
 -- ===========================================================================
 -- 本文件由 sql/setup/render.py 自动生成,请勿手工编辑。
 -- 生成器:src/rca/sampledata.py    Schema 真源:knowledge/tables.yaml
--- 方言:databricks    目标:main.gmv_rca.<table>
+-- 方言:databricks    目标:workspace.gmv_rca.<table>
 --
 -- 使用方式(Databricks):在 SQL Editor 中按顺序整段执行。
 -- 全部语句均为幂等:CREATE OR REPLACE + 确定性 INSERT,重跑得到完全相同的数据。
@@ -9,10 +9,10 @@
 -- ===========================================================================
 
 -- [schema:0]
-CREATE SCHEMA IF NOT EXISTS main.gmv_rca;
+CREATE SCHEMA IF NOT EXISTS workspace.gmv_rca;
 
 -- [create:dim_product]
-CREATE OR REPLACE TABLE main.gmv_rca.dim_product (
+CREATE OR REPLACE TABLE workspace.gmv_rca.dim_product (
   product_id BIGINT NOT NULL,
   category STRING NOT NULL,
   sub_category STRING NOT NULL,
@@ -21,7 +21,7 @@ CREATE OR REPLACE TABLE main.gmv_rca.dim_product (
 USING DELTA;
 
 -- [create:dim_user]
-CREATE OR REPLACE TABLE main.gmv_rca.dim_user (
+CREATE OR REPLACE TABLE workspace.gmv_rca.dim_user (
   user_id BIGINT NOT NULL,
   region STRING NOT NULL,
   market STRING NOT NULL,
@@ -31,7 +31,7 @@ CREATE OR REPLACE TABLE main.gmv_rca.dim_user (
 USING DELTA;
 
 -- [create:fact_sessions]
-CREATE OR REPLACE TABLE main.gmv_rca.fact_sessions (
+CREATE OR REPLACE TABLE workspace.gmv_rca.fact_sessions (
   session_id STRING NOT NULL,
   user_id BIGINT NOT NULL,
   channel STRING NOT NULL,
@@ -44,7 +44,7 @@ CREATE OR REPLACE TABLE main.gmv_rca.fact_sessions (
 USING DELTA;
 
 -- [create:fact_orders]
-CREATE OR REPLACE TABLE main.gmv_rca.fact_orders (
+CREATE OR REPLACE TABLE workspace.gmv_rca.fact_orders (
   order_id STRING NOT NULL,
   session_id STRING NOT NULL,
   user_id BIGINT NOT NULL,
@@ -60,7 +60,7 @@ CREATE OR REPLACE TABLE main.gmv_rca.fact_orders (
 USING DELTA;
 
 -- [create:fact_ad_spend]
-CREATE OR REPLACE TABLE main.gmv_rca.fact_ad_spend (
+CREATE OR REPLACE TABLE workspace.gmv_rca.fact_ad_spend (
   campaign_id STRING NOT NULL,
   channel STRING NOT NULL,
   market STRING NOT NULL,
@@ -72,7 +72,7 @@ CREATE OR REPLACE TABLE main.gmv_rca.fact_ad_spend (
 USING DELTA;
 
 -- [insert:dim_product]
-INSERT INTO main.gmv_rca.dim_product
+INSERT INTO workspace.gmv_rca.dim_product
 SELECT
   product_id,
   category,
@@ -88,7 +88,7 @@ FROM (
 ) q;
 
 -- [insert:dim_user]
-INSERT INTO main.gmv_rca.dim_user
+INSERT INTO workspace.gmv_rca.dim_user
 SELECT
   user_id,
   (CASE market WHEN 'US' THEN 'NA' WHEN 'UK' THEN 'EMEA' WHEN 'DE' THEN 'EMEA' END) AS region,
@@ -101,7 +101,7 @@ FROM (
 ) m;
 
 -- [insert:fact_sessions]
-INSERT INTO main.gmv_rca.fact_sessions
+INSERT INTO workspace.gmv_rca.fact_sessions
 WITH
   dates AS (SELECT explode(sequence(DATE '2025-05-05', DATE '2025-06-29', INTERVAL 1 DAY)) AS dt),
   channels AS (
@@ -151,7 +151,7 @@ SELECT
 FROM sess;
 
 -- [insert:fact_orders]
-INSERT INTO main.gmv_rca.fact_orders
+INSERT INTO workspace.gmv_rca.fact_orders
 -- 订单完全由 fact_sessions 推导:转化判定与订单级随机量都从 session_id 派生,
 -- 因此这条语句可以独立重跑,结果不变(简报约束 3)。
 WITH ordered AS (
@@ -160,7 +160,7 @@ WITH ordered AS (
     1 + CAST(FLOOR((pmod(hash(session_id || '|prod'), 1000000) / 1000000.0) * 240) AS BIGINT) AS product_id,
     (pmod(hash(session_id || '|status'), 1000000) / 1000000.0) AS r_status,
     (pmod(hash(session_id || '|amt'), 1000000) / 1000000.0) AS r_amt
-  FROM main.gmv_rca.fact_sessions s
+  FROM workspace.gmv_rca.fact_sessions s
   WHERE ((pmod(hash(session_id || '|conv'), 1000000) / 1000000.0)) < (0.045 * (CASE channel WHEN 'Paid Search' THEN 0.9 WHEN 'Organic' THEN 1.15 WHEN 'Email' THEN 1.4 WHEN 'Social' THEN 0.6 WHEN 'Direct' THEN 1.25 END) * (CASE device WHEN 'mobile' THEN 0.8 WHEN 'desktop' THEN 1.3 END) * (CASE market WHEN 'US' THEN 1.0 WHEN 'UK' THEN 0.95 WHEN 'DE' THEN 0.9 END) * (0.94 + 0.12 * (pmod(hash(concat_ws('|', CAST(dt AS STRING), channel, device, market, 'cvr')), 1000000) / 1000000.0)))
 )
 SELECT
@@ -176,10 +176,10 @@ SELECT
   (CASE WHEN o.r_status < 0.92 THEN 'COMPLETED' WHEN o.r_status < 0.97 THEN 'CANCELLED' ELSE 'REFUNDED' END) AS order_status,
   o.dt
 FROM ordered o
-JOIN main.gmv_rca.dim_product p ON o.product_id = p.product_id;
+JOIN workspace.gmv_rca.dim_product p ON o.product_id = p.product_id;
 
 -- [insert:fact_ad_spend]
-INSERT INTO main.gmv_rca.fact_ad_spend
+INSERT INTO workspace.gmv_rca.fact_ad_spend
 WITH
   dates AS (SELECT explode(sequence(DATE '2025-05-05', DATE '2025-06-29', INTERVAL 1 DAY)) AS dt),
   channels AS (
@@ -210,13 +210,13 @@ FROM (
 ) x;
 
 -- [verify] 自检:sessions_converted 必须等于 completed_orders
-SELECT 'sessions'             AS check_name, CAST(COUNT(*) AS STRING) AS value FROM main.gmv_rca.fact_sessions
-UNION ALL SELECT 'orders_all_status'    AS check_name, CAST(COUNT(*) AS STRING) AS value FROM main.gmv_rca.fact_orders
-UNION ALL SELECT 'completed_orders'     AS check_name, CAST(COUNT(*) AS STRING) AS value FROM main.gmv_rca.fact_orders WHERE order_status = 'COMPLETED'
-UNION ALL SELECT 'sessions_converted'   AS check_name, CAST(COUNT(*) AS STRING) AS value FROM main.gmv_rca.fact_sessions WHERE converted
-UNION ALL SELECT 'products'             AS check_name, CAST(COUNT(*) AS STRING) AS value FROM main.gmv_rca.dim_product
-UNION ALL SELECT 'users'                AS check_name, CAST(COUNT(*) AS STRING) AS value FROM main.gmv_rca.dim_user
-UNION ALL SELECT 'ad_spend_rows'        AS check_name, CAST(COUNT(*) AS STRING) AS value FROM main.gmv_rca.fact_ad_spend
-UNION ALL SELECT 'first_dt'             AS check_name, CAST(MIN(dt) AS STRING) AS value FROM main.gmv_rca.fact_sessions
-UNION ALL SELECT 'last_dt'              AS check_name, CAST(MAX(dt) AS STRING) AS value FROM main.gmv_rca.fact_sessions
-UNION ALL SELECT 'distinct_days'        AS check_name, CAST(COUNT(DISTINCT dt) AS STRING) AS value FROM main.gmv_rca.fact_sessions;
+SELECT 'sessions'             AS check_name, CAST(COUNT(*) AS STRING) AS value FROM workspace.gmv_rca.fact_sessions
+UNION ALL SELECT 'orders_all_status'    AS check_name, CAST(COUNT(*) AS STRING) AS value FROM workspace.gmv_rca.fact_orders
+UNION ALL SELECT 'completed_orders'     AS check_name, CAST(COUNT(*) AS STRING) AS value FROM workspace.gmv_rca.fact_orders WHERE order_status = 'COMPLETED'
+UNION ALL SELECT 'sessions_converted'   AS check_name, CAST(COUNT(*) AS STRING) AS value FROM workspace.gmv_rca.fact_sessions WHERE converted
+UNION ALL SELECT 'products'             AS check_name, CAST(COUNT(*) AS STRING) AS value FROM workspace.gmv_rca.dim_product
+UNION ALL SELECT 'users'                AS check_name, CAST(COUNT(*) AS STRING) AS value FROM workspace.gmv_rca.dim_user
+UNION ALL SELECT 'ad_spend_rows'        AS check_name, CAST(COUNT(*) AS STRING) AS value FROM workspace.gmv_rca.fact_ad_spend
+UNION ALL SELECT 'first_dt'             AS check_name, CAST(MIN(dt) AS STRING) AS value FROM workspace.gmv_rca.fact_sessions
+UNION ALL SELECT 'last_dt'              AS check_name, CAST(MAX(dt) AS STRING) AS value FROM workspace.gmv_rca.fact_sessions
+UNION ALL SELECT 'distinct_days'        AS check_name, CAST(COUNT(DISTINCT dt) AS STRING) AS value FROM workspace.gmv_rca.fact_sessions;

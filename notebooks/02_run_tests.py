@@ -13,7 +13,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -q pytest sqlglot pydantic PyYAML
+# MAGIC %pip install -q pytest "sqlglot>=25.0" "pydantic>=2.7" "PyYAML>=6.0"
 
 # COMMAND ----------
 
@@ -34,7 +34,7 @@ print("存在 pyproject.toml:", (REPO_ROOT / "pyproject.toml").is_file())
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "main", "Unity Catalog 目录")
+dbutils.widgets.text("catalog", "workspace", "Unity Catalog 目录")
 dbutils.widgets.text("test_schema", "gmv_rca_test", "测试用 schema(会被覆盖重建)")
 
 os.environ["DATABRICKS_CATALOG"] = dbutils.widgets.get("catalog")
@@ -47,7 +47,10 @@ print("测试目标:", os.environ["DATABRICKS_CATALOG"], ".", os.environ["RCA_TE
 # MAGIC %md
 # MAGIC ## 1. 不需要数据库的那部分
 # MAGIC
-# MAGIC 知识库校验、手算对照、SQL 方言校验、凭据处理 —— 先跑这些,快且能提前发现低级错误。
+# MAGIC 知识库校验、手算对照、SQL 方言校验、凭据处理、SQL 守卫与比对器、LLM 接入层(用假 HTTP)——
+# MAGIC 先跑这些,快且能提前发现低级错误。
+# MAGIC
+# MAGIC **期望:`157 passed, 1 skipped`**(跳过的那条需要本地 duckdb)
 
 # COMMAND ----------
 
@@ -55,11 +58,13 @@ import pytest
 
 offline = pytest.main([
     "-q",
+    "-p", "no:cacheprovider",   # 不往 Git folder 里写 .pytest_cache
     "tests/test_knowledge.py",
     "tests/test_math_analytic.py",
     "tests/test_databricks_dialect.py",
     "tests/test_config.py",
     "tests/test_nl2sql_units.py",
+    "tests/test_llm.py",
 ])
 print("\n退出码:", offline)
 assert offline == 0, "离线测试未通过 —— 先修这些,不要急着连库"
@@ -76,12 +81,15 @@ assert offline == 0, "离线测试未通过 —— 先修这些,不要急着连�
 # MAGIC * 职责边界:越线必须报错(`test_decompose_guards.py`)
 # MAGIC * **循环本身** —— 自修复、评估器自检、状态表、改进闭环(`test_nl2sql_loop.py`)
 # MAGIC
-# MAGIC ⚠ 第一次跑要等 warehouse / serverless 计算启动,可能一两分钟。
+# MAGIC **期望:`85 passed, 1 skipped`**(跳过的那条是 duckdb 专用)
+# MAGIC
+# MAGIC ⚠ 第一次跑要等 serverless 计算启动,可能一两分钟。
 
 # COMMAND ----------
 
 online = pytest.main([
     "-q",
+    "-p", "no:cacheprovider",
     "--rca-target=spark",
     "tests/test_sample_data.py",
     "tests/test_closure.py",

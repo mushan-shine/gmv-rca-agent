@@ -12,7 +12,7 @@
 # MAGIC L3 改进（跨版本）    失败归因 → 补 few-shot/提示 → 版本 +1 → 回归闸门 → 合并
 # MAGIC ```
 # MAGIC
-# MAGIC **第 2 格会自动探测你的 workspace 有没有可用的 LLM 端点。**
+# MAGIC **顶部 `llm_provider` 选模型:`databricks` / `zhipu` / `none`。第 1 节会真调一次做冒烟测试。**
 # MAGIC 没有也不影响:除生成环节之外的一切都能跑,并且用「永远正确的生成器」
 # MAGIC 校验评估器本身。
 # MAGIC
@@ -25,7 +25,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -q pydantic PyYAML sqlglot
+# MAGIC %pip install -q "pydantic>=2.7" "PyYAML>=6.0" "sqlglot>=25.0"
 
 # COMMAND ----------
 
@@ -40,13 +40,21 @@ from pathlib import Path
 REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-dbutils.widgets.text("catalog", "main", "Unity Catalog 目录")
+dbutils.widgets.text("catalog", "workspace", "Unity Catalog 目录")
 dbutils.widgets.text("schema", "gmv_rca", "Schema")
-dbutils.widgets.text("endpoint", "databricks-meta-llama-3-3-70b-instruct", "LLM 端点(可留空)")
+dbutils.widgets.dropdown("llm_provider", "databricks", ["databricks", "zhipu", "none"], "LLM 供应商")
+dbutils.widgets.text("endpoint", "databricks-meta-llama-3-3-70b-instruct", "Databricks 端点名")
+dbutils.widgets.text("zhipu_model", "glm-4-flash", "智谱模型")
+dbutils.widgets.text("secret_scope", "llm", "Secret scope")
+dbutils.widgets.text("secret_key", "zhipu_api_key", "Secret key")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
+PROVIDER = dbutils.widgets.get("llm_provider")
 ENDPOINT = dbutils.widgets.get("endpoint").strip()
+ZHIPU_MODEL = dbutils.widgets.get("zhipu_model").strip()
+SECRET_SCOPE = dbutils.widgets.get("secret_scope").strip()
+SECRET_KEY = dbutils.widgets.get("secret_key").strip()
 
 from rca.config import build_target
 from rca.knowledge import load_knowledge
@@ -54,9 +62,13 @@ from rca.nl2sql.cases import build_reference_sql, load_cases, validate_cases
 from rca.nl2sql.evaluate import Evaluator, question_map, reference_sql_map, regression_gate
 from rca.nl2sql.generate import LlmSqlGenerator, ReferenceGenerator
 from rca.nl2sql.llm import (
+    ZHIPU_BASE_URL,
     CachingChatClient,
+    LlmError,
     OpenAIChatClient,
     UsageMeter,
+    build_chat_client,
+    check_connectivity,
 )
 from rca.nl2sql.knowledge_store import (
     load_prompt_knowledge,
@@ -80,45 +92,95 @@ print(f"提示知识 {prompt_knowledge.label}:{len(prompt_knowledge.hints)} 条�
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. 这个 workspace 有 LLM 可用吗?
+# MAGIC ## 1. 选择并验证 LLM
 # MAGIC
-# MAGIC 列出所有 serving 端点。看到 `databricks-meta-llama-*`、`databricks-gpt-*`
-# MAGIC 之类的名字,就说明 Foundation Model APIs 可用,把它填进上面的 `endpoint` 组件。
+# MAGIC 顶部 **`llm_provider`** 下拉框决定用哪个模型:
+# MAGIC
+# MAGIC | 选项 | 走哪里 | 前提 |
+# MAGIC |---|---|---|
+# MAGIC | `databricks` | workspace 内的 serving 端点,请求不出 Databricks | 左侧 Serving 里有 Foundation Model 端点 |
+# MAGIC | `zhipu` | 智谱开放平台 `glm-4-flash`(免费) | ① 把 API key 存进 Databricks secret ② notebook 能连上 `open.bigmodel.cn` |
+# MAGIC | `none` | 不调模型,用 `ReferenceGenerator` 校验评估器本身 | 无 |
+# MAGIC
+# MAGIC 本格会**真调一次模型**做冒烟测试 —— 连不上、key 不对,在这里就暴露,不会白跑整批评估。
 
 # COMMAND ----------
 
 LLM_AVAILABLE = False
-WORKSPACE_HOST = ""
-WORKSPACE_TOKEN = ""
+chat_client = None
 
-try:
-    from databricks.sdk import WorkspaceClient
+if PROVIDER == "databricks":
+    try:
+        from databricks.sdk import WorkspaceClient
 
-    workspace = WorkspaceClient()
-    # notebook 内的凭据由 Runtime 注入,不需要手工配 token
-    WORKSPACE_HOST = (workspace.config.host or "").rstrip("/")
-    WORKSPACE_TOKEN = workspace.config.token or ""
+        workspace = WorkspaceClient()
+        # notebook 内凭据由 Runtime 注入。不能直接读 config.token —— Runtime 认证下它可能为空。
+        host = (workspace.config.host or "").rstrip("/")
+        auth_header = workspace.config.authenticate().get("Authorization", "")
+        token = auth_header[len("Bearer "):] if auth_header.startswith("Bearer ") else ""
 
-    endpoints = list(workspace.serving_endpoints.list())
-    if endpoints:
-        print("可用的 serving 端点:")
-        for item in endpoints:
-            print(f"  - {item.name}")
-        LLM_AVAILABLE = any(item.name == ENDPOINT for item in endpoints)
-        if not LLM_AVAILABLE and ENDPOINT:
+        endpoints = [item.name for item in workspace.serving_endpoints.list()]
+        print("可用的 serving 端点:" if endpoints else "这个 workspace 没有任何 serving 端点。")
+        for name in endpoints:
+            print(f"  - {name}")
+        if ENDPOINT in endpoints:
+            chat_client = OpenAIChatClient(
+                base_url=f"{host}/serving-endpoints",
+                api_key=token,
+                model=ENDPOINT,
+                temperature=0.0,
+                max_tokens=1024,
+            )
+        elif endpoints:
             print(f"\n⚠ 列表里没有 {ENDPOINT!r} —— 把 endpoint 组件改成上面某个名字再重跑本格。")
+        else:
+            print("\n→ 没有 Databricks 端点。把顶部 llm_provider 改成 zhipu 或 none 再重跑本格。")
+    except Exception as exc:  # noqa: BLE001
+        print(f"无法列出 serving 端点:{exc}")
+
+elif PROVIDER == "zhipu":
+    # ① 连通性:Free Edition 限制出站网络,先确认能不能连到智谱
+    reachable, message = check_connectivity(ZHIPU_BASE_URL)
+    print(f"open.bigmodel.cn:{message}")
+    if not reachable:
+        print(
+            "\n✗ 这个 workspace 的 notebook 连不上智谱(出站网络受限)。\n"
+            "  这不是配置问题,改 key 没有用。把这一段输出发给我,我给你换成\n"
+            "  「循环在本机跑、SQL 在 Databricks 执行」的方式。\n"
+            "  现在可以先把 llm_provider 改成 none,把其余流程跑完。"
+        )
     else:
-        print("这个 workspace 没有任何 serving 端点。")
-except Exception as exc:  # noqa: BLE001
-    print(f"无法列出 serving 端点:{exc}")
+        # ② API key:只从 secret 读,不写进 notebook
+        api_key = ""
+        try:
+            api_key = dbutils.secrets.get(SECRET_SCOPE, SECRET_KEY)
+            print(f"API key:已从 secret {SECRET_SCOPE}/{SECRET_KEY} 读取")
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"\n✗ 读不到 secret {SECRET_SCOPE}/{SECRET_KEY}:{type(exc).__name__}\n"
+                "  按 docs/DATABRICKS_SETUP.md 第 7.5 节用 Databricks CLI 创建,然后重跑本格。"
+            )
+        if api_key:
+            chat_client = build_chat_client(
+                {}, provider="zhipu", api_key=api_key, model=ZHIPU_MODEL, cache=False
+            )
+
+else:
+    print("llm_provider = none:不调模型。")
+
+# ③ 冒烟测试:真调一次。key 错、模型名错、额度用完,都在这里暴露。
+if chat_client is not None:
+    try:
+        probe = chat_client.complete("Reply with exactly: SELECT 1")
+        print(f"\n冒烟测试通过:模型 {probe.model} · {probe.latency_ms} ms · "
+              f"{probe.total_tokens} tokens · 回复 {probe.text.strip()[:60]!r}")
+        LLM_AVAILABLE = True
+    except LlmError as exc:
+        print(f"\n✗ 冒烟测试失败:{exc}")
 
 print(f"\nLLM 可用:{LLM_AVAILABLE}")
 if not LLM_AVAILABLE:
-    print("→ 下面会用 ReferenceGenerator(永远正确)跑通整条流水线并校验评估器本身。")
-    print("  要接外部 API,把下一格的 client 换成:")
-    print("  OpenAIChatClient(base_url='https://api.openai.com/v1',")
-    print("                   api_key=dbutils.secrets.get('scope', 'openai'), model='gpt-4o-mini')")
-    print("  ⚠ 外部 API 意味着请求出站 + schema 离开 workspace,方案里要写清楚。")
+    print("→ 下面会用 ReferenceGenerator(永远正确)跑通整条流水线,满分结果是在校验评估器本身。")
 
 # COMMAND ----------
 
@@ -129,22 +191,12 @@ if not LLM_AVAILABLE:
 
 # COMMAND ----------
 
-usage = UsageMeter(max_calls=200, max_tokens=500_000)   # 预算熔断
+usage = UsageMeter(max_calls=200, max_tokens=500_000)   # 预算熔断,在花钱之前检查
 
 if LLM_AVAILABLE:
-    # 走 workspace 内的 serving 端点 —— 请求不出 Databricks,符合出站受限的约束。
-    # 外面包一层缓存:评估会把逐字相同的 prompt 打很多遍,第二遍不该再付费,
-    # 同一版本的评估结果也因此完全可复现。
-    client = CachingChatClient(
-        OpenAIChatClient(
-            base_url=f"{WORKSPACE_HOST}/serving-endpoints",
-            api_key=WORKSPACE_TOKEN,
-            model=ENDPOINT,
-            temperature=0.0,      # 采样噪声会让指标涨跌无法归因
-            max_tokens=1024,
-        )
-    )
-    generator = LlmSqlGenerator(client, meter=usage)
+    # 包一层 prompt 缓存:评估会把逐字相同的 prompt 打很多遍,第二遍不该再付费,
+    # 同一版本的评估结果也因此可复现。
+    generator = LlmSqlGenerator(CachingChatClient(chat_client), meter=usage)
 else:
     # 基线:永远给出正确答案。它的作用不是刷分,而是**校验评估器本身** ——
     # 一个永远正确的生成器必须拿满分,否则问题出在比对/标准答案/守卫上。

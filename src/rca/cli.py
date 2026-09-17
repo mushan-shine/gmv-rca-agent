@@ -193,7 +193,7 @@ def cmd_sql(args: argparse.Namespace) -> int:
     dialect_name = "databricks" if args.target == "spark" else args.target
     dialect_cls = DIALECTS[dialect_name]
     if dialect_name == "databricks":
-        dialect = dialect_cls(catalog=args.catalog or "main", schema=args.schema or "gmv_rca")
+        dialect = dialect_cls(catalog=args.catalog or "workspace", schema=args.schema or "gmv_rca")
     else:
         dialect = dialect_cls(schema=args.schema or "main")
 

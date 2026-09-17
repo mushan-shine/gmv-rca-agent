@@ -11,6 +11,14 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -q "pydantic>=2.7" "PyYAML>=6.0"
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
 import sys
 from pathlib import Path
 
@@ -26,7 +34,7 @@ print("repo root:", REPO_ROOT)
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "main", "Unity Catalog 目录")
+dbutils.widgets.text("catalog", "workspace", "Unity Catalog 目录")
 dbutils.widgets.text("schema", "gmv_rca", "Schema")
 dbutils.widgets.text("daily_sessions", "6000", "日均会话数")
 

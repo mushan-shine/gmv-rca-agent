@@ -27,7 +27,9 @@ from rca.nl2sql.llm import (
     OpenAIChatClient,
     StaticChatClient,
     UsageMeter,
+    ZHIPU_BASE_URL,
     build_chat_client,
+    check_connectivity,
     prompt_fingerprint,
 )
 
@@ -449,3 +451,80 @@ def test_usage_delta_isolates_one_run_from_the_next():
     assert run.calls == 1 and run.cached_calls == 1
     assert run.total_tokens == 35
     assert meter.total_tokens == 155, "累计值本身不受影响"
+
+
+
+# ---------------------------------------------------------------------------
+# 智谱
+# ---------------------------------------------------------------------------
+def test_zhipu_preset_points_at_the_open_platform():
+    client = build_chat_client(
+        {"RCA_LLM_PROVIDER": "zhipu", "ZHIPUAI_API_KEY": FAKE_KEY}, cache=False
+    )
+    assert client.base_url == ZHIPU_BASE_URL
+    assert client.model == "glm-4-flash"
+
+
+def test_zhipu_preset_turns_off_sampling():
+    """``do_sample=False`` 是智谱的贪婪解码开关 —— 评估要可复现就必须关掉采样。"""
+    client = build_chat_client({"RCA_LLM_PROVIDER": "zhipu", "ZHIPUAI_API_KEY": FAKE_KEY}, cache=False)
+    assert client.extra_body == {"do_sample": False}
+
+
+def test_zhipu_model_can_be_overridden():
+    client = build_chat_client(
+        {"RCA_LLM_PROVIDER": "zhipu", "ZHIPUAI_API_KEY": FAKE_KEY, "RCA_LLM_MODEL": "glm-4-plus"},
+        cache=False,
+    )
+    assert client.model == "glm-4-plus"
+
+
+def test_zhipu_without_key_explains_where_to_get_one():
+    with pytest.raises(LlmConfigError, match="open.bigmodel.cn"):
+        build_chat_client({"RCA_LLM_PROVIDER": "zhipu"}, cache=False)
+
+
+def test_extra_body_is_sent_in_the_request(monkeypatch):
+    http = _FakeHttp([_chat_body("ok")])
+    monkeypatch.setattr(llm_module.urllib.request, "urlopen", http)
+    _client(extra_body={"do_sample": False}).complete("q")
+    assert json.loads(http.requests[0].data)["do_sample"] is False
+
+
+def test_extra_body_is_part_of_the_cache_key():
+    """开着采样和关着采样的回复不能互相冒充。"""
+    greedy = CachingChatClient(_client(extra_body={"do_sample": False}))
+    sampled = CachingChatClient(_client(extra_body={"do_sample": True}))
+    assert greedy.key_for("p") != sampled.key_for("p")
+
+
+def test_content_filter_is_reported_distinctly():
+    """被内容安全拦截不是「模型没写出 SQL」,反馈必须说清楚。"""
+
+    class Filtered:
+        model = "glm-4-flash"
+        params: dict[str, Any] = {}
+
+        def complete(self, prompt: str) -> LlmResponse:
+            return LlmResponse(text="", model="glm-4-flash", finish_reason="sensitive")
+
+    generation = LlmSqlGenerator(Filtered()).generate(_context())
+    assert "内容安全" in generation.error
+    assert not generation.refused
+
+
+def test_connectivity_treats_any_http_status_as_reachable(monkeypatch):
+    """401 / 404 说明网络是通的,只是请求不对。"""
+    monkeypatch.setattr(llm_module.urllib.request, "urlopen", _FakeHttp([_http_error(404)]))
+    ok, message = check_connectivity(ZHIPU_BASE_URL)
+    assert ok and "404" in message
+
+
+def test_connectivity_reports_network_blocks(monkeypatch):
+    monkeypatch.setattr(
+        llm_module.urllib.request,
+        "urlopen",
+        _FakeHttp([urllib.error.URLError("Name or service not known")]),
+    )
+    ok, message = check_connectivity(ZHIPU_BASE_URL)
+    assert not ok and "连不上" in message

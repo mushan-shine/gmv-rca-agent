@@ -28,7 +28,7 @@ from .warehouse import DatabricksExecutor, DuckDBExecutor, SparkExecutor, SqlExe
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-DEFAULT_CATALOG = "main"
+DEFAULT_CATALOG = "workspace"
 DEFAULT_SCHEMA = "gmv_rca"
 
 ENV_HOSTNAME = "DATABRICKS_SERVER_HOSTNAME"
