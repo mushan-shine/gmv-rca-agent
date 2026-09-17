@@ -679,3 +679,20 @@ def test_a_real_unknown_column_is_still_caught_next_to_a_date_unit(offline_guard
     )
     assert report.hallucinated
     assert "revenue" in report.feedback()
+
+
+def test_refusal_wrapped_in_a_sql_fence_is_still_a_refusal():
+    """真实模型输出(glm-4-flash,unanswerable_customer_email):拒答被包进了 ```sql 代码块。
+    它是正确的拒答,不能被当成 SQL 交给守卫、连错三轮后判成「该拒答没拒答」。"""
+    generation = parse_response(
+        "```sql\nCANNOT_ANSWER: The schema provided does not include an email address column.\n```"
+    )
+    assert generation.refused
+    assert "email" in (generation.refusal_reason or "")
+
+
+def test_empty_reply_is_not_a_refusal():
+    """空回复当成拒答的话,不可答题会被白白判对。"""
+    generation = parse_response("")
+    assert not generation.refused
+    assert generation.sql == ""

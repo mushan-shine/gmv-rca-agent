@@ -249,7 +249,8 @@ def parse_response(text: str, model: str = "") -> Generation:
     """
     raw = (text or "").strip()
     if not raw:
-        return Generation(sql=None, refusal_reason=None, raw=raw, model=model)
+        # 空回复不是拒答。当成拒答的话,不可答题会被白白判对、可答题会被记成「误拒」。
+        return Generation(sql="", raw=raw, model=model)
 
     refusal = re.search(rf"{REFUSAL_PREFIX}\s*[::]?\s*(.*)", raw, re.IGNORECASE)
     fenced = re.search(r"```(?:sql)?\s*(.+?)```", raw, re.DOTALL | re.IGNORECASE)
@@ -261,7 +262,19 @@ def parse_response(text: str, model: str = "") -> Generation:
             model=model,
         )
     if fenced:
-        return Generation(sql=fenced.group(1).strip(), raw=raw, model=model)
+        body = fenced.group(1).strip()
+        # 真实踩过的坑:glm-4-flash 会把拒答也包进 ```sql 代码块。
+        # 不识别的话,正确的拒答被当成 SQL 交给守卫,报「无法解析」连错三轮,
+        # 最后判成「该拒答没拒答」—— 评分器错了,改进循环就会朝错误方向优化。
+        inner = re.match(rf"{REFUSAL_PREFIX}\s*[::]?\s*(.*)", body, re.IGNORECASE | re.DOTALL)
+        if inner:
+            return Generation(
+                sql=None,
+                refusal_reason=inner.group(1).strip() or "(未给出理由)",
+                raw=raw,
+                model=model,
+            )
+        return Generation(sql=body, raw=raw, model=model)
     if re.match(r"^\s*(SELECT|WITH)\b", raw, re.IGNORECASE):
         return Generation(sql=raw, raw=raw, model=model)
     return Generation(sql="", raw=raw, model=model)
