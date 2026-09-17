@@ -29,6 +29,13 @@ REPO_ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
 os.chdir(REPO_ROOT)          # pytest 要靠 pyproject.toml 定位 rootdir
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+# /Workspace 文件系统不支持创建 __pycache__(Errno 95)。
+# 普通 import 会静默忽略这个错误,但 pytest 改写断言时写缓存会直接崩,
+# 表现为「ImportError while loading conftest」。关掉字节码写入,缓存引到 /tmp。
+import tempfile
+sys.dont_write_bytecode = True
+sys.pycache_prefix = os.path.join(tempfile.gettempdir(), "pycache")
+
 print("repo root:", REPO_ROOT)
 print("存在 pyproject.toml:", (REPO_ROOT / "pyproject.toml").is_file())
 
