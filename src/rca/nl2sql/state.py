@@ -167,21 +167,28 @@ class StateStore:
             f" ORDER BY created_at DESC, run_id DESC LIMIT {int(limit)}"
         )
 
-    def previous_run(self, before_run_id: str) -> dict[str, Any] | None:
+    def previous_run(
+        self, before_run_id: str, *, same_generator: bool = True
+    ) -> dict[str, Any] | None:
         """紧挨在 ``before_run_id`` **之前**的那次评估。
 
         刻意不是「除它以外最新的一条」—— 那个语义在并发跑批或时间戳撞车时
-        会拿到错误的基线,于是回归闸门会拿这一版去比一个不相干的版本。
-        这里用子查询取出本次的时间戳,再找严格早于它的最后一条。
+        会拿到错误的基线。这里取出本次的时间戳,再找严格早于它的最后一条。
+
+        ``same_generator=True``(默认)时只和**同一个生成器**比。真实踩过的坑:
+        接上智谱之后的第一次评估,被拿去和之前 ``ReferenceGenerator``(永远正确)
+        的 100% 比,闸门报「全量正确率退步 100% → 0%」—— 结论毫无意义。
+        生成器名里带模型名(``llm:glm-4-flash``),所以换模型也不会互相比。
         """
         table = self.dialect.qualify(EVAL_RUNS_TABLE)
         target = SqlDialect.string_literal(before_run_id)
+        generator_filter = " AND r.generator = a.generator" if same_generator else ""
         rows = self.executor.run(
             f"WITH anchor AS ("
-            f" SELECT created_at FROM {table} WHERE run_id = {target}"
+            f" SELECT created_at, generator FROM {table} WHERE run_id = {target}"
             f" ORDER BY created_at DESC LIMIT 1)"
             f" SELECT r.* FROM {table} r CROSS JOIN anchor a"
-            f" WHERE r.created_at < a.created_at AND r.run_id <> {target}"
+            f" WHERE r.created_at < a.created_at AND r.run_id <> {target}{generator_filter}"
             f" ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1"
         )
         return rows[0] if rows else None

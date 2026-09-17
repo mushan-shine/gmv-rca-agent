@@ -495,7 +495,7 @@ def test_improvement_loop_closes(knowledge, target, make_loop, cases, store):
     """
 
     class BlankGenerator:
-        name = "blank"
+        name = "model-improve"
 
         def generate(self, context: PromptContext) -> Generation:
             return Generation(sql="", raw="", model=self.name)
@@ -536,7 +536,7 @@ def test_improvement_loop_closes(knowledge, target, make_loop, cases, store):
         knowledge=knowledge,
         dialect=target.dialect,
         executor=target.executor,
-        loop=make_loop(_reference_for(subset, knowledge, target)),
+        loop=make_loop(_reference_for(subset, knowledge, target, name="model-improve")),
         cases=subset,
         store=store,
     )
@@ -558,7 +558,7 @@ def test_gate_would_block_a_regression(knowledge, target, make_loop, cases, stor
     """反向:新版本更差时,闸门必须拦住。"""
 
     class BlankGenerator:
-        name = "blank"
+        name = "model-regress"
 
         def generate(self, context: PromptContext) -> Generation:
             return Generation(sql="", raw="", model=self.name)
@@ -571,7 +571,7 @@ def test_gate_would_block_a_regression(knowledge, target, make_loop, cases, stor
         knowledge=knowledge,
         dialect=target.dialect,
         executor=target.executor,
-        loop=make_loop(_reference_for(subset, knowledge, target)),
+        loop=make_loop(_reference_for(subset, knowledge, target, name="model-regress")),
         cases=subset,
         store=store,
     )
@@ -594,7 +594,7 @@ def test_gate_would_block_a_regression(knowledge, target, make_loop, cases, stor
     assert decision.reasons
 
 
-def _reference_for(subset, knowledge, target):
+def _reference_for(subset, knowledge, target, name="reference"):
     from rca.nl2sql.cases import build_reference_sql
     from rca.nl2sql.generate import ReferenceGenerator
 
@@ -603,4 +603,82 @@ def _reference_for(subset, knowledge, target):
         for case in subset
         if case.gold.kind.value != "unanswerable"
     }
-    return ReferenceGenerator(answers)
+    return ReferenceGenerator(answers, name=name)
+
+
+
+# ---------------------------------------------------------------------------
+# 报告日历 + 回归闸门的基线隔离(第一次接真实模型时踩到的两个坑)
+# ---------------------------------------------------------------------------
+def test_wall_clock_sql_is_repaired_using_the_reporting_calendar(make_loop, target):
+    """模型用 CURRENT_DATE() 查「上周」—— 语法正确、执行成功、返回 NULL。
+
+    第一次接智谱时 26 条里 22 条就是这样答错的,而且 L1 完全没发现。
+    设了报告日期之后,这必须成为一次**可修复的**失败,反馈里要给出具体日期写法。
+    """
+    from datetime import date
+
+    table = target.dialect.qualify("fact_orders")
+    question = "What was the total GMV last week?"
+    generator = ScriptedGenerator(
+        {
+            question: [
+                f"```sql\nSELECT SUM(order_amount) AS v FROM {table} WHERE order_status = 'COMPLETED' "
+                f"AND dt BETWEEN DATEADD(day, -7, CURRENT_DATE()) AND CURRENT_DATE()\n```",
+                f"```sql\nSELECT SUM(order_amount) AS v FROM {table} WHERE order_status = 'COMPLETED' "
+                f"AND dt BETWEEN DATE '2025-06-23' AND DATE '2025-06-29'\n```",
+            ]
+        }
+    )
+    outcome = make_loop(generator, as_of=date(2025, 6, 30)).answer(question)
+
+    assert outcome.status is Status.ANSWERED
+    assert outcome.attempts_used == 2
+    assert outcome.attempts[0].failure_kind == "guard"
+    assert "CURRENT_DATE" in " ".join(outcome.attempts[0].guard_messages)
+    assert outcome.rows and outcome.rows[0]["v"] is not None
+
+
+def test_wall_clock_is_allowed_when_no_report_date_is_set(make_loop, target):
+    """没设报告日期(真实的线上数据)时,CURRENT_DATE 是合法写法,不能误伤。"""
+    table = target.dialect.qualify("fact_orders")
+    generator = ScriptedGenerator(
+        {"q": [f"```sql\nSELECT COUNT(*) AS n FROM {table} WHERE dt <= CURRENT_DATE()\n```"]}
+    )
+    outcome = make_loop(generator).answer("q")
+    assert outcome.status is Status.ANSWERED
+    assert outcome.attempts_used == 1
+
+
+def test_prompt_carries_the_reporting_calendar(make_loop):
+    from datetime import date
+
+    loop = make_loop(ScriptedGenerator({}), as_of=date(2025, 6, 30))
+    context = loop.initial_context("What was GMV last week?")
+    joined = " ".join(context.calendar)
+    assert "2025-06-23 to 2025-06-29" in joined
+    assert "CURRENT_DATE" in joined
+    assert context.with_feedback("x").calendar == context.calendar, "修复轮次不能把日历丢掉"
+
+
+def test_gate_baseline_is_isolated_per_generator(store):
+    """真实踩过的坑:接上智谱后第一次评估,被拿去和 ReferenceGenerator 的 100% 比,
+    闸门报「全量正确率退步 100% → 0%」。基线必须是**同一个生成器**的上一次。"""
+    from datetime import datetime, timedelta, timezone
+
+    t0 = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    rows = [
+        ("iso_ref_1", "reference", t0),
+        ("iso_llm_1", "llm:iso-model", t0 + timedelta(seconds=1)),
+        ("iso_ref_2", "reference", t0 + timedelta(seconds=2)),
+        ("iso_llm_2", "llm:iso-model", t0 + timedelta(seconds=3)),
+    ]
+    for run_id, generator, created_at in rows:
+        store.record_eval_run(
+            {"run_id": run_id, "generator": generator, "created_at": created_at,
+             "knowledge_version": "v1", "n_cases": 1, "pass_final": 0.5}
+        )
+
+    assert store.previous_run("iso_llm_2")["run_id"] == "iso_llm_1"
+    assert store.previous_run("iso_llm_1") is None, "同一个模型之前没跑过,就没有基线"
+    assert store.previous_run("iso_llm_2", same_generator=False)["run_id"] == "iso_ref_2"

@@ -77,6 +77,7 @@ from rca.nl2sql.knowledge_store import (
 )
 from rca.nl2sql.loop import AnswerLoop
 from rca.nl2sql.state import StateStore
+from rca.sampledata import SampleDataConfig
 
 knowledge = load_knowledge(REPO_ROOT / "knowledge")
 cases = load_cases(REPO_ROOT / "eval" / "cases.yaml")
@@ -161,9 +162,12 @@ elif PROVIDER == "zhipu":
                 "  按 docs/DATABRICKS_SETUP.md 第 7.5 节用 Databricks CLI 创建,然后重跑本格。"
             )
         if api_key:
-            chat_client = build_chat_client(
-                {}, provider="zhipu", api_key=api_key, model=ZHIPU_MODEL, cache=False
-            )
+            try:
+                chat_client = build_chat_client(
+                    {}, provider="zhipu", api_key=api_key, model=ZHIPU_MODEL, cache=False
+                )
+            except LlmError as exc:
+                print(f"\n✗ {exc}")
 
 else:
     print("llm_provider = none:不调模型。")
@@ -208,11 +212,16 @@ else:
             answers[case.question] = build_reference_sql(case, knowledge, target.dialect)
     generator = ReferenceGenerator(answers, refusals)
 
+# 「今天」= 样例数据截止日的次日。prompt 里会带上报告日历(「上周」是哪几天),
+# 否则模型会用 CURRENT_DATE() 查真实世界的上周 —— 那里没有数据。
+REPORT_DATE = SampleDataConfig().report_date
+
 loop = AnswerLoop(
     knowledge=knowledge,
     dialect=target.dialect,
     executor=target.executor,
     generator=generator,
+    as_of=REPORT_DATE,
     hints=prompt_knowledge.hint_texts(),
     examples=prompt_knowledge.few_shots(),
 )
@@ -227,6 +236,7 @@ evaluator = Evaluator(
     store=store,
 )
 print("生成器:", getattr(generator, "name", type(generator).__name__))
+print("报告日期:", REPORT_DATE, "(prompt 里的「今天」)")
 print("预算上限:", f"{usage.max_calls} 次调用 / {usage.max_tokens:,} token")
 
 # COMMAND ----------
@@ -344,7 +354,7 @@ else:
 
 # COMMAND ----------
 
-baseline = store.previous_run(report.run_id)
+baseline = store.previous_run(report.run_id)   # 只和同一个生成器(同一个模型)的上一次比
 decision = regression_gate(report, baseline)
 print(f"基线:{baseline['run_id'] if baseline else '(无,首次评估)'}")
 print(f"判定:{'通过 ✓' if decision.accepted else '拒绝 ✗'}")

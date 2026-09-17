@@ -39,6 +39,7 @@ import json
 import os
 import random
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -222,6 +223,21 @@ class OpenAIChatClient:
     extra_headers: Mapping[str, str] = field(default_factory=dict)
     extra_body: Mapping[str, Any] = field(default_factory=dict)
     """供应商特有的请求字段,原样并入请求体。例如智谱的 ``{"do_sample": False}``。"""
+
+    def __post_init__(self) -> None:
+        bad = [c for c in self.api_key if unicodedata.category(c).startswith("C")]
+        if bad:
+            # 真实踩过的坑:在命令行的隐藏输入提示里按 Ctrl+V,会把控制字符 \x16
+            # 当成 key 的一部分存进 secret。带着它的请求头不合法,智谱前面的网关
+            # 直接回一个 HTML 400,完全看不出是 key 的问题。所以在发请求之前就拦下。
+            # 报错里只给个数和码点,绝不带 key 本身。
+            codes = sorted({f"U+{ord(c):04X}" for c in bad})
+            raise LlmConfigError(
+                f"API key 里有 {len(bad)} 个不可见的控制字符({', '.join(codes)}),"
+                f"请求头会不合法,网关会直接返回 400。\n"
+                f"通常是在命令行的隐藏输入提示里按 Ctrl+V 粘贴造成的。"
+                f"请重新存一次 key(见 docs/DATABRICKS_SETUP.md 第 7.5 节)。"
+            )
 
     def __repr__(self) -> str:  # 防止 key 出现在异常栈里
         return (

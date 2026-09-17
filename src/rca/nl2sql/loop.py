@@ -27,8 +27,10 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
@@ -42,9 +44,16 @@ from .generate import (
     PromptContext,
     SqlGenerator,
     render_metric_glossary,
+    render_reporting_calendar,
     render_schema,
 )
 from .guard import GuardReport, SqlGuard
+
+_WALL_CLOCK = re.compile(
+    r"\b(current_date|current_timestamp|getdate|sysdate)\b|\bnow\s*\(",
+    re.IGNORECASE,
+)
+"""引用真实世界时钟的 SQL 函数。数据是历史快照时,用它们的查询必然查到空集。"""
 
 DEFAULT_MAX_ATTEMPTS = 3
 """默认最多三轮。
@@ -174,7 +183,12 @@ class AnswerLoop:
     max_rows: int = 500
     """单次查询返回行数上限。防止模型写出 ``SELECT *`` 把整张表拉回来。"""
 
+    as_of: date | None = None
+    """报告日期(「今天」)。设了之后,prompt 里会带报告日历,
+    并且 SQL 里引用真实世界时钟(``CURRENT_DATE`` / ``NOW()``)会被当成可修复的错误。"""
+
     _schema_text: str = field(default="", repr=False)
+    _calendar: tuple[str, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if self.guard is None:
@@ -182,6 +196,7 @@ class AnswerLoop:
         if not self.hints:
             self.hints = tuple(render_metric_glossary(self.knowledge))
         self._schema_text = render_schema(self.knowledge, self.dialect)
+        self._calendar = render_reporting_calendar(self.as_of) if self.as_of else ()
 
     def initial_context(self, question: str) -> PromptContext:
         return PromptContext(
@@ -189,6 +204,22 @@ class AnswerLoop:
             schema_text=self._schema_text,
             hints=self.hints,
             examples=self.examples,
+            calendar=self._calendar,
+        )
+
+    def _context_violations(self, sql: str) -> tuple[str, ...]:
+        """守卫之外、依赖**运行上下文**的确定性检查。
+
+        守卫只认 schema;而「数据是历史快照,不能用当前日期」是上下文约束。
+        违反它的 SQL 语法正确、执行成功、返回 NULL —— 不在这里拦下,
+        L1 永远发现不了,只能等 L2 评估时才暴露。
+        """
+        if self.as_of is None or not _WALL_CLOCK.search(sql):
+            return ()
+        return (
+            "SQL 用了 CURRENT_DATE / NOW() 等真实世界的当前时间,但数据是历史快照,"
+            "这样会查到空集。请改用报告日历(Reporting calendar)里给出的具体日期,"
+            "写成 dt BETWEEN DATE 'YYYY-MM-DD' AND DATE 'YYYY-MM-DD'。",
         )
 
     def answer(self, question: str) -> LoopOutcome:
@@ -273,19 +304,21 @@ class AnswerLoop:
 
             sql = generation.sql or ""
             report: GuardReport = self.guard.check(sql)
-            if not report.ok:
+            context_messages = self._context_violations(report.sql) if report.ok else ()
+            if not report.ok or context_messages:
+                messages = report.messages + context_messages
                 attempts.append(
                     Attempt(
                         attempt_no=attempt_no,
                         sql=sql,
                         fingerprint=sql_fingerprint(sql) if sql else "",
-                        guard_messages=report.messages,
+                        guard_messages=messages,
                         hallucinated=report.hallucinated,
                         latency_ms=_elapsed_ms(started),
                         **usage,
                     )
                 )
-                context = context.with_feedback(report.feedback())
+                context = context.with_feedback("\n".join(messages))
                 continue
 
             try:

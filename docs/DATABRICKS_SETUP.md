@@ -301,11 +301,33 @@ databricks auth login --host https://<你的workspace地址>
 databricks secrets create-scope llm
 ```
 
+**不要**直接运行 `databricks secrets put-secret llm zhipu_api_key` 然后在它的提示里按 Ctrl+V ——
+那个提示不认 Ctrl+V,会把它当成控制字符 `\x16` 一起存进 key。带着它的请求会被智谱前面的网关
+直接回 HTML 400,完全看不出是 key 的问题(本项目真实踩过)。
+
+在 **PowerShell** 里先读进变量、清掉控制字符、确认长度,再写入:
+
 ```bash
-databricks secrets put-secret llm zhipu_api_key
+$k = Read-Host "粘贴智谱 API key(用鼠标右键粘贴)"
 ```
 
-最后一条会提示你粘贴 key 的值 —— 这样 key 不会留在 shell 历史里。
+```bash
+$k = ($k -replace '[\x00-\x1F\x7F]', '').Trim(); "长度: $($k.Length)"
+```
+
+智谱的 key 一般是 49 位。长度对了再写入:
+
+```bash
+databricks secrets put-secret llm zhipu_api_key --string-value $k
+```
+
+```bash
+Remove-Variable k
+```
+
+key 不会显示在屏幕上,PowerShell 历史里记下的也只是变量名 `$k`。
+如果之前登录时遇到 `OS keyring unreachable`,先执行 `$env:DATABRICKS_AUTH_STORAGE="plaintext"`。
+
 确认存进去了(只列名字,不显示值):
 
 ```bash
@@ -413,6 +435,7 @@ databricks secrets list-secrets llm
 | 大量 `generator` 类失败,`generation_error` 写着「被截断」 | `max_tokens` 太小 | 调大装配格里的 `max_tokens`;截断的回复是半条 SQL,修不出来 |
 | 接外部 API 时请求超时/连不上 | Free Edition 出站受限 | 改用 workspace 内的 serving 端点(默认路径) |
 | 智谱连通性检查显示「连不上」 | Free Edition 出站受限,挡住了 `open.bigmodel.cn` | 先把 `llm_provider` 改成 `none` 跑完其余流程;把输出发给我,换成本机跑循环的方式 |
+| 冒烟测试报「API key 里有 N 个不可见的控制字符」,或智谱返回 **HTML** 格式的 400(`alibaba-ga`) | 存 key 时在命令行提示里按了 Ctrl+V,混进了 `\x16` | 按 7.5 节的 PowerShell 方式重新存一次 |
 | 智谱报 `401 令牌已过期或验证不正确` | secret 里的 key 不对或已删除 | 去智谱控制台重新建 key,`databricks secrets put-secret llm zhipu_api_key` 覆盖 |
 | 智谱报 `429` 或额度相关错误 | 免费模型限流/额度用完 | 客户端会自动退避重试;持续出现就隔一段时间再跑,或减少评估 case |
 | `generation_error` 写着「被内容安全策略拦截」 | 智谱对某条问题触发了内容审核 | 记下是哪条 case,发给我看 |

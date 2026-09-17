@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from ..dialects import SqlDialect
@@ -67,6 +68,8 @@ class PromptContext:
     """上一轮失败的**具体**原因。自修复循环靠它收敛。"""
 
     attempt_no: int = 1
+    calendar: tuple[str, ...] = ()
+    """报告日历:「今天」是哪天、「上周」是哪几天。见 :func:`render_reporting_calendar`。"""
 
     def with_feedback(self, message: str) -> "PromptContext":
         return PromptContext(
@@ -76,6 +79,7 @@ class PromptContext:
             examples=self.examples,
             feedback=(*self.feedback, message),
             attempt_no=self.attempt_no + 1,
+            calendar=self.calendar,
         )
 
 
@@ -158,6 +162,35 @@ def render_metric_glossary(knowledge: Knowledge) -> list[str]:
     return lines
 
 
+def render_reporting_calendar(as_of: date) -> tuple[str, ...]:
+    """把「今天」翻译成相对时间词对应的具体日期。
+
+    为什么需要它 —— 第一次接真实模型评估时,26 条 case 里 22 条答错,
+    模型写的是 ``dt BETWEEN DATEADD(day, -7, CURRENT_DATE()) AND CURRENT_DATE()``:
+    把「上周」理解成了真实世界的上周。数据却是一段历史快照,于是查到空集,
+    SQL 照样跑通、返回 NULL。换一个人类分析师,拿到同样的上下文也会这么写 ——
+    这是上下文缺失,不是模型能力问题。
+
+    真实系统里「上周」「上个月」由语义层 / 报表日历统一定义,所以这不算泄题:
+    给的是日历规则,不是任何一条问题的答案。周从周一开始、到周日结束。
+    """
+    this_monday = as_of - timedelta(days=as_of.weekday())
+    last_monday = this_monday - timedelta(days=7)
+    prior_monday = last_monday - timedelta(days=7)
+    fmt = lambda d: d.isoformat()  # noqa: E731
+    return (
+        f"Today is {fmt(as_of)} ({as_of.strftime('%A')}). The data is a historical snapshot "
+        f"that ends on {fmt(as_of - timedelta(days=1))}.",
+        "Weeks run Monday to Sunday.",
+        f'"last week" means {fmt(last_monday)} to {fmt(last_monday + timedelta(days=6))} inclusive.',
+        f'"the week before (last week)" and "two weeks ago" mean '
+        f"{fmt(prior_monday)} to {fmt(prior_monday + timedelta(days=6))} inclusive.",
+        "Filter dates with literal bounds, e.g. dt BETWEEN DATE 'YYYY-MM-DD' AND DATE 'YYYY-MM-DD'. "
+        "NEVER use CURRENT_DATE(), CURRENT_TIMESTAMP(), NOW() or GETDATE() - "
+        "they point at the real-world date, where there is no data.",
+    )
+
+
 def build_prompt(context: PromptContext, dialect_name: str = "Databricks SQL") -> str:
     """把 :class:`PromptContext` 拼成完整 prompt。
 
@@ -174,6 +207,10 @@ def build_prompt(context: PromptContext, dialect_name: str = "Databricks SQL") -
     if context.hints:
         parts += ["", "## Metric definitions and gotchas"]
         parts += [f"- {hint}" for hint in context.hints]
+
+    if context.calendar:
+        parts += ["", "## Reporting calendar"]
+        parts += [f"- {line}" for line in context.calendar]
 
     parts += [
         "",

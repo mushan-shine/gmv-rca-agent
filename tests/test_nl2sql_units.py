@@ -619,3 +619,63 @@ def test_gate_accepts_a_genuine_improvement():
     }
     decision: GateDecision = regression_gate(candidate, baseline)
     assert decision.accepted, decision.reasons
+
+
+
+# ---------------------------------------------------------------------------
+# 报告日历
+# ---------------------------------------------------------------------------
+def test_report_date_is_the_day_after_the_data_ends():
+    from datetime import date
+
+    from rca.sampledata import SampleDataConfig
+
+    config = SampleDataConfig()
+    assert config.report_date == date(2025, 6, 30)
+
+
+def test_calendar_matches_the_eval_set_week_labels():
+    """日历里「上周」「两周前」必须和评估集 W8 / W7 的标准答案窗口完全一致,
+    否则模型照着日历写对了,比对器反而判错。"""
+    from rca.nl2sql.generate import render_reporting_calendar
+    from rca.sampledata import SampleDataConfig
+
+    joined = " ".join(render_reporting_calendar(SampleDataConfig().report_date))
+    w8, w7 = resolve_period("W8"), resolve_period("W7")
+    assert f"{w8.start} to {w8.end}" in joined
+    assert f"{w7.start} to {w7.end}" in joined
+
+
+def test_calendar_uses_the_last_complete_week_mid_week():
+    """周四问「上周」,指的仍是上一个完整的周一到周日。"""
+    from datetime import date
+
+    from rca.nl2sql.generate import render_reporting_calendar
+
+    joined = " ".join(render_reporting_calendar(date(2025, 7, 3)))
+    assert "2025-06-23 to 2025-06-29" in joined
+
+
+def test_prompt_without_calendar_has_no_calendar_section():
+    context = PromptContext(question="q", schema_text="s")
+    assert "Reporting calendar" not in build_prompt(context)
+
+
+@pytest.mark.parametrize("dialect", ["databricks", "duckdb"])
+def test_date_unit_keywords_are_not_hallucinated_columns(knowledge, dialect):
+    """真实模型写出的 DATEADD(day, -7, ...):DuckDB 的解析器把 day 当成列。
+    守卫的结论不能依赖方言解析器的细节,否则反馈会变成「列 day 不存在」。"""
+    guard = SqlGuard(knowledge, dialect=dialect)
+    report = guard.check(
+        "SELECT SUM(order_amount) FROM fact_orders "
+        "WHERE dt BETWEEN DATEADD(day, -7, CURRENT_DATE()) AND CURRENT_DATE()"
+    )
+    assert not report.hallucinated, report.messages
+
+
+def test_a_real_unknown_column_is_still_caught_next_to_a_date_unit(offline_guard):
+    report = offline_guard.check(
+        "SELECT SUM(revenue) FROM fact_orders WHERE dt >= DATEADD(day, -7, DATE '2025-06-30')"
+    )
+    assert report.hallucinated
+    assert "revenue" in report.feedback()

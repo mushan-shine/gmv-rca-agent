@@ -130,6 +130,16 @@ class SampleDataConfig:
         return date.fromordinal(self.start_date.toordinal() + self.n_days - 1)
 
     @property
+    def report_date(self) -> date:
+        """「今天」—— 数据截止日的次日。
+
+        样例数据是一段**历史快照**。问「上周」时,这个日期决定上周是哪几天。
+        不给模型这个锚点,它会用 ``CURRENT_DATE()``,查到一个没有数据的时间段,
+        SQL 照样跑通、返回 NULL —— 自修复循环完全发现不了(真实踩过的坑)。
+        """
+        return date.fromordinal(self.end_date.toordinal() + 1)
+
+    @property
     def user_bounds(self) -> dict[str, tuple[int, int]]:
         """按市场把 user_id 切成互不重叠的区间,保证会话的 market 与用户的 market 一致。"""
         bounds: dict[str, tuple[int, int]] = {}

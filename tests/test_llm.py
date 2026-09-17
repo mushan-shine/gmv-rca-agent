@@ -528,3 +528,24 @@ def test_connectivity_reports_network_blocks(monkeypatch):
     )
     ok, message = check_connectivity(ZHIPU_BASE_URL)
     assert not ok and "连不上" in message
+
+
+def test_control_character_in_key_fails_before_any_request(monkeypatch):
+    """真实踩过的坑:隐藏输入提示里按 Ctrl+V,把 \x16 存进了 key。
+
+    带着它的请求头不合法,网关回 HTML 400,完全看不出是 key 的问题。
+    必须在发请求之前就拦下,并且报错里绝不能带 key 本身。
+    """
+    http = _FakeHttp([_chat_body("ok")])
+    monkeypatch.setattr(llm_module.urllib.request, "urlopen", http)
+
+    with pytest.raises(LlmConfigError, match="控制字符") as info:
+        _client(api_key="\x16" + FAKE_KEY)
+    assert "U+0016" in str(info.value)
+    assert FAKE_KEY not in str(info.value)
+    assert http.requests == [], "不能先发请求再报错"
+
+
+def test_zhipu_preset_rejects_a_key_with_control_characters():
+    with pytest.raises(LlmConfigError, match="控制字符"):
+        build_chat_client({"RCA_LLM_PROVIDER": "zhipu", "ZHIPUAI_API_KEY": "abc\x16.def"}, cache=False)

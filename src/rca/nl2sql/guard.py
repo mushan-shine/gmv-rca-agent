@@ -34,6 +34,16 @@ _FORBIDDEN = re.compile(
 )
 
 
+_DATE_PARTS = frozenset(
+    {
+        "year", "years", "quarter", "quarters", "month", "months", "week", "weeks",
+        "day", "days", "dayofweek", "dayofyear", "hour", "hours", "minute", "minutes",
+        "second", "seconds", "millisecond", "milliseconds", "microsecond", "microseconds",
+    }
+)
+"""日期函数的时间单位参数。见 :meth:`SqlGuard._allowed_columns`。"""
+
+
 class Violation(str, Enum):
     """守卫能给出的判定。每一种都对应一条可以喂回给模型的具体反馈。"""
 
@@ -180,6 +190,10 @@ class SqlGuard:
         # SELECT 里的别名可以在 GROUP BY / ORDER BY / HAVING 里被再次引用
         for alias in statement.find_all(exp.Alias):
             allowed.add(alias.alias_or_name)
+        # 时间单位关键字(DATEADD(day, -7, ...) 里的 day)。有的方言解析器会把它当成列,
+        # 误判成「幻觉列」并反馈「列 day 不存在」—— 反馈错了,自修复就会往错的方向改。
+        # 真实列名优先:只有 schema 里没有同名列时才放行。
+        allowed |= _DATE_PARTS
         return allowed
 
     def _suggest(self, tables: set[str]) -> str:
