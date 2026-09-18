@@ -264,10 +264,9 @@ def _judge(case: EvalCase, golden: Golden, outcome: LoopOutcome) -> tuple[bool, 
     if outcome.status is Status.REFUSED:
         return False, f"误拒:这个问题其实答得了。模型给的理由:{outcome.refusal_reason[:120]}"
     if outcome.status is Status.FAILED:
-        last = outcome.attempts[-1] if outcome.attempts else None
-        reason = (
-            (last.execution_error or " | ".join(last.guard_messages)) if last else "无尝试记录"
-        )
+        # 取最后一轮的**全部**反馈。只取引擎报错和守卫信息时,被取值检查 / 日历检查
+        # 拦下的失败原因是空的 —— 04 第一次真实运行里两道题的原因就这样丢了。
+        reason = _last_feedback(outcome) or "无尝试记录"
         return False, f"{outcome.attempts_used} 轮都没写出能跑的 SQL:{reason}"
 
     match: MatchResult = compare_result_sets(

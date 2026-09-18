@@ -206,7 +206,7 @@ sessions_converted   14416          ← 必须与上一行相等
 
 ```
 168 passed, 1 skipped     ← 第 1 段:离线部分
-119 passed, 1 skipped     ← 第 2 段:跑在 Spark 上
+133 passed, 1 skipped     ← 第 2 段:跑在 Spark 上
 因子分解残差      -1.074e-12 %   (要求 < 0.1%)
 维度分解最大残差   1.440e-13 %   (要求 < 0.1%)
 ```
@@ -366,18 +366,37 @@ databricks secrets list-secrets llm
 打开 `notebooks/04_improvement_loop.py`。顶部组件默认值就能用
 (`llm_provider=zhipu`、最多 4 轮、连续 2 轮不采纳即停、目标准确率 0.9、调用上限 400)。
 
-1. 右上角 **Connect → Serverless**
-2. **Run all**
-3. 第 4 节「运行自主改进循环」那一格要 **15~25 分钟**,期间每结束一轮会打印一行:
+| 组件 | 默认 | 说明 |
+|---|---|---|
+| `zhipu_model` | `glm-4-flash` | 写 SQL 的模型 |
+| `proposer_model` | 空 | 提改进的模型;留空 = 与上面相同。提议者每轮只调用 1 次,换一个更强的模型成本很低 |
+| `max_rounds` / `patience` | 4 / 2 | 空话在试跑前就被拒、不耗时,想让它多试几类错,可以把两者调到 6 / 4 |
+
+1. Git folder 里先 **Pull**(拿到最新代码)
+2. 右上角 **Connect → Serverless**
+3. **Run all**
+4. 第 4 节「运行自主改进循环」那一格要 **15~25 分钟**,期间每结束一轮会打印:
 
 ```
-── 第 1 轮  ✓ 采纳  训练集 71.4% · 留出集 80.0%
-   提示:Use the market column for country codes (US, UK, DE); region only holds NA/EMEA.
-   原因:训练集 13 → 15 道,留出集 60.0% → 80.0%
-── 第 2 轮  ✗ 拒绝  训练集 71.4% · 留出集 80.0%
-   提示:...
-   原因:训练集没有多答对:15 → 15(共 21 道)
+── 第 1 轮  ⊘ 太笼统(未试跑)  针对 missed_refusal  未试跑
+   提示:Always double-check the query logic.
+   原因:提示没有点名任何具体的表、列、取值或指标,试跑前拒绝(不花试跑成本)
+── 第 2 轮  ✓ 采纳  针对 wrong_value  训练集 71.4% · 留出集 80.0%
+   提示:CVR is completed orders / sessions as a fraction between 0 and 1; never multiply by 100.
+   修好:cvr_w8, cvr_paid_search_w8   改坏:-
+   原因:训练集 14 → 16 道,留出集 80.0% → 80.0%
 ```
+
+(上面是格式示意,不是真实结果。)
+
+每一行的读法:
+
+| 字段 | 含义 |
+|---|---|
+| 针对 | 这一轮只给提议者看的那一类错题(`dimension_value` / `missed_refusal` / `wrong_value` / `wrong_shape` / `no_runnable_sql` / `false_refusal`) |
+| ⊘ 太笼统 | 提示没有点名任何表、列、取值或指标,**没有试跑**就被拒绝 —— 省下一次完整评估 |
+| 修好 / 改坏 | 试跑中从错变对、从对变错的训练题。总分只是两者之差,要一起看 |
+| 原因 | 闸门的裁决依据。「针对的 N 道题一道都没修好」表示总分涨了但涨在别处,按噪声处理 |
 
 跑完看三样东西:
 
@@ -385,7 +404,8 @@ databricks secrets list-secrets llm
 |---|---|
 | 5. 迭代曲线 | 第 0 行基线,之后每轮一行,**含被拒绝的** |
 | 6. 台账 | `nl2sql_improvement_ledger` 里每个候选的指标前后对比与裁决原因 |
-| 8. 提议者的 prompt | 确认里面**没有** `holdout_` 开头的题、**没有**参考 SQL |
+| 7. 剩下的错题 | 按失败形态分组列出,每道题带具体原因 |
+| 8. 提议者的 prompt | 确认里面**没有** `holdout_` 开头的题、**没有**参考 SQL,以往被拒的提示都在 |
 
 **再跑一次 04** 会发生什么:上一次被拒绝的提示会出现在提议者的 prompt 里
 (第 3 节会打印「以往被拒绝过的提示:N 条」),它不会再提同样的东西 ——
@@ -452,6 +472,8 @@ databricks secrets list-secrets llm
 ---
 
 ## 10. 排查表
+
+> 每个问题的完整排查过程(现象、定位方法、根因)见 [EXECUTION_LOG.md](EXECUTION_LOG.md) 第四节。
 
 | 现象 | 原因 | 怎么办 |
 |---|---|---|

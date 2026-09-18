@@ -20,7 +20,11 @@ from rca.nl2sql.improve import (
     ProposalContext,
     FailureEvidence,
     ScriptedProposer,
+    Vocabulary,
     build_proposer_prompt,
+    build_vocabulary,
+    choose_focus,
+    failure_pattern,
     improvement_gate,
     parse_proposal,
 )
@@ -397,3 +401,159 @@ def test_hint_used_in_existing_knowledge_is_a_duplicate(loop_setup, store):
         knowledge, loop_id="loop_dup"
     )
     assert result.rounds[0].decision == "duplicate"
+
+
+# ---------------------------------------------------------------------------
+# 04 第一次真实运行之后补上的三条机制
+# ---------------------------------------------------------------------------
+# glm-4-flash 在 Databricks 上真实提出、并被闸门拒绝的两条提示(各让训练集 14 → 12)
+REAL_VAGUE_HINTS = (
+    "Always verify column names and values against the actual data dictionary.",
+    "Always verify the correct usage of dimensions and metrics in queries.",
+)
+
+
+@pytest.fixture()
+def vocabulary(knowledge, domains) -> Vocabulary:
+    return build_vocabulary(knowledge, domains)
+
+
+@pytest.mark.parametrize("hint", REAL_VAGUE_HINTS)
+def test_the_real_vague_hints_name_nothing(vocabulary, hint):
+    assert vocabulary.named_in(hint) == ()
+
+
+@pytest.mark.parametrize(
+    ("hint", "named"),
+    [
+        ("Countries are stored in market as US, UK and DE; region only holds NA and EMEA.", "market"),
+        ("CVR is a fraction between 0 and 1. Never multiply it by 100.", "cvr"),
+        ("device values are lowercase, e.g. mobile.", "mobile"),
+        ("If the question needs data no table has, reply CANNOT_ANSWER.", "cannot_answer"),
+    ],
+)
+def test_specific_hints_are_recognised(vocabulary, hint, named):
+    assert named in vocabulary.named_in(hint)
+
+
+def test_short_values_match_case_sensitively(vocabulary):
+    """「US」是取值,「us」是英文代词。后者不能让一句空话蒙混过关。"""
+    assert vocabulary.named_in("This rule helps us write better SQL.") == ()
+
+
+def _failed(case_id, verdict_status, *, answerable=True, detail="", feedback="", correct=False):
+    return CaseResult(case_id, case_id, answerable, False, verdict_status, correct, 3, False,
+                      detail=detail, last_feedback=feedback)
+
+
+def test_failures_are_grouped_by_pattern():
+    assert failure_pattern(_failed("a", Status.FAILED, feedback="列 market 没有取值 'Germany'")) == "dimension_value"
+    assert failure_pattern(_failed("b", Status.FAILED, feedback="执行失败")) == "no_runnable_sql"
+    assert failure_pattern(_failed("c", Status.ANSWERED, answerable=False)) == "missed_refusal"
+    assert failure_pattern(_failed("d", Status.ANSWERED, detail="value_mismatch: 期望 0.04,实际 100.0")) == "wrong_value"
+    assert failure_pattern(_failed("e", Status.ANSWERED, detail="row_count: 标准答案 2 行")) == "wrong_shape"
+    assert failure_pattern(_failed("f", Status.REFUSED)) == "false_refusal"
+
+
+def test_focus_takes_the_largest_untried_pattern_and_rotates():
+    patterns = ["wrong_value", "wrong_value", "dimension_value", "missed_refusal", "missed_refusal"]
+    first = choose_focus(patterns)
+    assert first == "missed_refusal", "数量相同时按 PATTERNS 的顺序"
+    second = choose_focus(patterns, tried={first})
+    assert second == "wrong_value", "试过没被采纳的一类,下一轮换一类"
+    assert choose_focus(patterns, tried=set(patterns)) == first, "全试过了就从头再来"
+    assert choose_focus([]) == ""
+
+
+def test_gate_rejects_a_gain_that_misses_the_targeted_cases():
+    """总分 +1,但涨在别的题上 —— 在 21 道题的规模上,这和噪声分不开。"""
+    base = _report([_result("t", correct=False), _result("other", correct=False)])
+    lucky = _report([_result("t", correct=False), _result("other", correct=True)])
+    assert improvement_gate(lucky, base).accepted, "不指定针对的题时,只看总分"
+    decision = improvement_gate(lucky, base, targeted=("t",))
+    assert not decision.accepted
+    assert any("针对的" in reason for reason in decision.reasons)
+    on_target = _report([_result("t", correct=True), _result("other", correct=False)])
+    assert improvement_gate(on_target, base, targeted=("t",)).accepted
+
+
+def test_context_failures_keep_their_reason(knowledge, target, cases, make_loop, domains):
+    """被取值检查拦下 3 轮的题,失败原因不能是空的 —— 04 第一次运行时就是空的。"""
+    case = next(c for c in cases if c.id == TRAIN_A)
+    table = target.dialect.qualify("fact_orders")
+    bad = f"```sql\nSELECT SUM(order_amount) AS v FROM {table} WHERE market = 'Germany'\n```"
+    loop = make_loop(ScriptedGenerator({case.question: [bad] * 3}), value_domains=domains)
+    report = Evaluator(knowledge=knowledge, dialect=target.dialect, executor=target.executor,
+                       loop=loop, cases=[case]).run(persist=False)
+
+    result = report.results[0]
+    assert result.verdict == "no_runnable_sql"
+    assert "Germany" in result.detail
+    assert failure_pattern(result) == "dimension_value"
+
+
+def test_vague_hint_is_rejected_before_any_trial(loop_setup, store, vocabulary):
+    evaluator, factory = loop_setup(
+        "gen-vague",
+        {TRAIN_A: lambda h: False, TRAIN_B: lambda h: False, HOLDOUT: lambda h: False},
+    )
+    runs = {"n": 0}
+    original = Evaluator.run
+
+    def counting(self, **kwargs):
+        runs["n"] += 1
+        return original(self, **kwargs)
+
+    Evaluator.run = counting
+    try:
+        result = AutoImprover(
+            evaluator, factory, ScriptedProposer([_proposal(REAL_VAGUE_HINTS[0])]),
+            store=store, patience=1, vocabulary=vocabulary,
+        ).run(PromptKnowledge(version=1), loop_id="loop_vague")
+    finally:
+        Evaluator.run = original
+
+    record = result.rounds[0]
+    assert record.decision == "too_generic"
+    assert record.trial_run_id == ""
+    assert runs["n"] == 1, "只跑了基线,没有为一条空话花一次完整试跑"
+    assert record.focus, "这一轮针对哪一类错,要记下来"
+
+    # 进了台账,下一次循环的提议者看得到
+    assert store.ledger("loop_vague")[0]["decision"] == "too_generic"
+    assert any(REAL_VAGUE_HINTS[0] == row["hint"] for row in store.rejected_hints("gen-vague"))
+
+
+def test_round_records_which_cases_flipped(loop_setup, store):
+    evaluator, factory = loop_setup(
+        "gen-flips",
+        {TRAIN_A: lambda h: "FLIP" in h, TRAIN_B: lambda h: "FLIP" not in h, HOLDOUT: lambda h: False},
+    )
+    result = AutoImprover(
+        evaluator, factory, ScriptedProposer([_proposal("FLIP a rule that trades one case for another")]),
+        store=store, patience=1,
+    ).run(PromptKnowledge(version=1), loop_id="loop_flips")
+
+    record = result.rounds[0]
+    assert record.fixed == (TRAIN_A,)
+    assert record.broken == (TRAIN_B,)
+    assert record.decision == "rejected", "一换一,总分没涨"
+    ledger = store.ledger("loop_flips")[0]
+    assert ledger["fixed"] == TRAIN_A and ledger["broken"] == TRAIN_B
+
+
+def test_proposer_prompt_shows_only_the_focused_pattern():
+    context = ProposalContext(
+        failures=(FailureEvidence("cvr_a", "CVR last week?", "wrong_answer",
+                                  "value_mismatch: 期望 0.04,实际 100.0", "SELECT 100.0", "",
+                                  "wrong_value"),),
+        current_hints=(),
+        rejected=((REAL_VAGUE_HINTS[0], "提示没有点名任何具体的表、列、取值或指标"),),
+        focus="wrong_value",
+        other_patterns=(("missed_refusal", 2),),
+    )
+    prompt = build_proposer_prompt(context)
+    assert "fix ONE failure pattern - wrong_value" in prompt
+    assert "SPECIFIC" in prompt
+    assert "missed_refusal: 2 question(s)" in prompt, "别的错只给数量,不给细节"
+    assert REAL_VAGUE_HINTS[0] in prompt, "被判为空话的提示也要告诉提议者"

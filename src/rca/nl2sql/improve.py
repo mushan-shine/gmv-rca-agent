@@ -30,6 +30,25 @@
 
 一次只改一个变量:每轮只加一条提示,模型、评估集、循环配置都不变。
 所以每一行台账里的指标差值,都可以归因到那一条提示上。
+
+第一次在 Databricks 上真实运行(glm-4-flash,基线训练集 14/21)得到的教训,
+决定了下面三条机制::
+
+    第 1 轮  "Always verify column names and values against the actual data dictionary."  14 → 12  拒绝
+    第 2 轮  "Always verify the correct usage of dimensions and metrics in queries."       14 → 12  拒绝
+
+**一次只打一类错。** 把 7 道各不相同的错题一股脑给提议者,它只能写出「放之四海皆准」的空话。
+现在先按失败形态分组(维度取值、该拒答没拒答、数值错、形状错……),每轮只给一组;
+这一组试过没被采纳,下一轮换下一组。
+
+**先做便宜的检查,再做昂贵的试跑。** 一次试跑要重跑整个评估集(约 37 次模型调用、4~5 分钟)。
+一条没有点名任何表、列、取值或指标的提示,在 prompt 里只是噪声 —— 上面两条就是。
+这类提示在试跑前就被拒掉(``too_generic``),照样记进台账、告诉下一轮的提议者。
+
+**提升要落在它针对的题上。** 两条内容空洞的提示都让训练集变了 2 道题,
+说明在 21 道题的规模上,「随便加一句话」本身就会带来 ±2 道的波动。
+如果只看总分,一次恰好 +1 的噪声就会被当成改进采纳。所以闸门还要求:
+这一轮针对的那组错题里,至少有一道被修好。
 """
 
 from __future__ import annotations
@@ -37,12 +56,17 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Iterable, Protocol, Sequence, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from ..knowledge import Knowledge
+from .compare import MatchFailure
+from .domains import VIOLATION_MARKER, ValueDomains
 from .evaluate import CaseResult, EvalReport, Evaluator, GateDecision
+from .generate import REFUSAL_PREFIX
 from .knowledge_store import Hint, PromptKnowledge
 from .llm import ChatClient, LlmError, UsageMeter
 from .loop import AnswerLoop
@@ -50,6 +74,102 @@ from .state import StateStore
 
 MAX_HINT_CHARS = 400
 MAX_FAILURES_SHOWN = 10
+
+
+# ---------------------------------------------------------------------------
+# 失败分组
+# ---------------------------------------------------------------------------
+PATTERNS: dict[str, str] = {
+    "dimension_value": (
+        "The SQL filtered a dimension column on a value that does not exist in the data "
+        "(wrong code, wrong letter case, or the value lives in a different column)."
+    ),
+    "missed_refusal": (
+        f"The question asks for data this warehouse does not contain. The correct reply is "
+        f"{REFUSAL_PREFIX}, but the assistant wrote SQL or failed instead."
+    ),
+    "wrong_value": "The SQL ran, but the number it returned is wrong (wrong formula, filter or scale).",
+    "wrong_shape": (
+        "The SQL ran, but returned the wrong number of rows or columns, or nothing at all "
+        "(wrong grouping, or a filter that removed rows it should keep)."
+    ),
+    "no_runnable_sql": "The assistant never produced SQL that passed the checks and executed.",
+    "false_refusal": "The assistant refused a question that the data can answer.",
+}
+"""失败形态 -> 给提议者看的说明。字典顺序即数量相同时的优先顺序。"""
+
+
+def failure_pattern(result: CaseResult) -> str:
+    """把一道错题归到一种失败形态。完全确定性。"""
+    verdict = result.verdict
+    if verdict == "should_have_refused":
+        return "missed_refusal"
+    if verdict == "false_refusal":
+        return "false_refusal"
+    if verdict == "no_runnable_sql":
+        return "dimension_value" if VIOLATION_MARKER in result.last_feedback else "no_runnable_sql"
+    if result.detail.startswith(MatchFailure.VALUE_MISMATCH.value):
+        return "wrong_value"
+    return "wrong_shape"
+
+
+def choose_focus(patterns: Iterable[str], tried: Iterable[str] = ()) -> str:
+    """这一轮打哪一类错:没试过的里面数量最多的;全试过了就从头再来。"""
+    counts = Counter(patterns)
+    if not counts:
+        return ""
+    order = list(PATTERNS)
+    untried = [p for p in counts if p not in set(tried)] or list(counts)
+    return min(untried, key=lambda p: (-counts[p], order.index(p) if p in order else len(order)))
+
+
+# ---------------------------------------------------------------------------
+# 具体性检查:试跑之前的便宜闸门
+# ---------------------------------------------------------------------------
+_GENERIC_WORDS = frozenset({"orders"})
+"""既是指标名又是普通英文单词的词。「check the orders」不算点名了任何东西。"""
+
+
+@dataclass(frozen=True)
+class Vocabulary:
+    """提示可以点名的具体对象:表、列、指标、维度名(不分大小写)与维度取值(区分大小写)。"""
+
+    identifiers: frozenset[str] = frozenset()
+    values: frozenset[str] = frozenset()
+
+    def __bool__(self) -> bool:
+        return bool(self.identifiers or self.values)
+
+    def named_in(self, text: str) -> tuple[str, ...]:
+        """``text`` 点名了哪些对象。"""
+        tokens = {token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text)}
+        found = sorted(tokens & self.identifiers)
+        found += sorted(
+            value for value in self.values
+            if re.search(rf"(?<![\w]){re.escape(value)}(?![\w])", text)
+        )
+        return tuple(dict.fromkeys(found))
+
+
+def build_vocabulary(knowledge: Knowledge, domains: ValueDomains | None = None) -> Vocabulary:
+    names = set(knowledge.tables) | set(knowledge.metrics) | set(knowledge.dimensions)
+    for table in knowledge.tables.values():
+        names |= set(table.columns)
+    names.add(REFUSAL_PREFIX)
+    identifiers = frozenset(n.lower() for n in names) - _GENERIC_WORDS
+    values: set[str] = set()
+    if domains is not None:
+        for allowed in domains.values.values():
+            values |= set(allowed)
+    return Vocabulary(identifiers, frozenset(values))
+
+
+def case_flips(before: EvalReport, after: EvalReport) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """训练集里哪些题从错变对(fixed)、从对变错(broken)。"""
+    was = {r.case_id: r.correct for r in before.train}
+    fixed = tuple(r.case_id for r in after.train if r.correct and not was.get(r.case_id, False))
+    broken = tuple(r.case_id for r in after.train if not r.correct and was.get(r.case_id, False))
+    return fixed, broken
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +185,7 @@ class FailureEvidence:
     detail: str
     sql: str
     feedback: str
+    pattern: str = ""
 
     @classmethod
     def of(cls, result: CaseResult) -> "FailureEvidence":
@@ -75,15 +196,22 @@ class FailureEvidence:
             detail=result.detail,
             sql=result.final_sql or result.last_sql,
             feedback=result.last_feedback,
+            pattern=failure_pattern(result),
         )
 
 
 @dataclass(frozen=True)
 class ProposalContext:
     failures: tuple[FailureEvidence, ...]
+    """这一轮要打的那一类错题。``focus`` 为空表示不分组、全部给出。"""
+
     current_hints: tuple[str, ...]
     rejected: tuple[tuple[str, str], ...]
     """(被拒绝的提示, 拒绝原因)。"""
+
+    focus: str = ""
+    other_patterns: tuple[tuple[str, int], ...] = ()
+    """其他尚未解决的失败形态及题数。只告诉提议者「还有这些」,不给细节,免得它又去面面俱到。"""
 
 
 class HintProposal(BaseModel):
@@ -118,11 +246,24 @@ def build_proposer_prompt(context: ProposalContext) -> str:
         "",
         "Propose exactly ONE new guideline to add to its instructions.",
         "",
+    ]
+    if context.focus:
+        lines += [
+            f"## This round: fix ONE failure pattern - {context.focus}",
+            PATTERNS.get(context.focus, ""),
+            "Every failure listed below has this pattern. Read the SQL and the checker "
+            "feedback, find the concrete mistake they share, and write the rule that "
+            "prevents it.",
+            "",
+        ]
+    lines += [
         "Requirements:",
-        "- It must be a GENERAL rule that would help on similar, unseen questions. Do not "
-        "mention case ids, specific expected numbers, or restate a single answer.",
-        "- It must address a failure pattern shared by the listed failures - prefer the "
-        "pattern that covers the most failures.",
+        "- It must be SPECIFIC: name the exact tables, columns, values, metrics or the "
+        f"{REFUSAL_PREFIX} reply it applies to, and say exactly what to do. Vague advice "
+        "such as 'verify column names' or 'check the data dictionary' is rejected "
+        "automatically without being tested.",
+        "- It must be GENERAL enough to help on similar, unseen questions. Do not mention "
+        "case ids or expected numbers, and do not restate a single answer.",
         "- Do not repeat or rephrase any existing guideline, and do not re-propose any "
         "previously rejected guideline.",
         f"- At most {MAX_HINT_CHARS} characters.",
@@ -139,7 +280,7 @@ def build_proposer_prompt(context: ProposalContext) -> str:
         lines += [f"- {hint}  -- rejected because: {reason}" for hint, reason in context.rejected]
     else:
         lines += ["(none)"]
-    lines += ["", "## Failures"]
+    lines += ["", f"## Failures{f' ({context.focus})' if context.focus else ''}"]
     for failure in context.failures[:MAX_FAILURES_SHOWN]:
         lines += [
             f"### {failure.case_id}  [{failure.verdict}]",
@@ -150,6 +291,9 @@ def build_proposer_prompt(context: ProposalContext) -> str:
         if failure.feedback:
             lines.append(f"Checker feedback: {failure.feedback}")
         lines.append("")
+    if context.other_patterns:
+        lines += ["## Other open failure patterns (later rounds - ignore them now)"]
+        lines += [f"- {pattern}: {count} question(s)" for pattern, count in context.other_patterns]
     return "\n".join(lines)
 
 
@@ -208,10 +352,16 @@ class ScriptedProposer:
 # ---------------------------------------------------------------------------
 # 裁决
 # ---------------------------------------------------------------------------
-def improvement_gate(candidate: EvalReport, baseline: EvalReport) -> GateDecision:
+def improvement_gate(
+    candidate: EvalReport,
+    baseline: EvalReport,
+    targeted: Sequence[str] = (),
+) -> GateDecision:
     """候选提示能不能被采纳。**完全确定性。**
 
     - 训练集必须**多答对至少一道**。持平不采纳:没有证据的改动只会让 prompt 越来越长;
+    - 给了 ``targeted``(这一轮针对的错题)时,其中**至少一道要被修好**。
+      提升落在别的题上,多半是 prompt 变动带来的波动,不能归因到这条提示;
     - 留出集准确率不得下降。这是防「背答案」的那道闸 —— 提议者从没见过留出集;
     - 幻觉率、误拒率不得升高。否则「一律拒答」或「多编几个列」都可能刷高训练分。
     """
@@ -221,6 +371,13 @@ def improvement_gate(candidate: EvalReport, baseline: EvalReport) -> GateDecisio
             f"训练集没有多答对:{baseline.train_correct} → {candidate.train_correct}"
             f"(共 {len(candidate.train)} 道)"
         )
+    if targeted:
+        fixed, _ = case_flips(baseline, candidate)
+        hit = [case for case in targeted if case in fixed]
+        if not hit:
+            reasons.append(
+                f"针对的 {len(targeted)} 道题一道都没修好,总分变化不能归因到这条提示"
+            )
     if candidate.holdout_accuracy < baseline.holdout_accuracy:
         reasons.append(
             f"留出集退步:{baseline.holdout_accuracy:.1%} → {candidate.holdout_accuracy:.1%}"
@@ -262,6 +419,14 @@ class RoundRecord:
     trial_run_id: str = ""
     rationale: str = ""
     targets: tuple[str, ...] = ()
+    focus: str = ""
+    """这一轮针对的失败形态。"""
+
+    fixed: tuple[str, ...] = ()
+    """试跑中从错变对的训练题。"""
+
+    broken: tuple[str, ...] = ()
+    """试跑中从对变错的训练题。与 ``fixed`` 一起看,才知道分数变化是怎么来的。"""
 
 
 @dataclass(frozen=True)
@@ -289,6 +454,9 @@ class ImprovementResult:
                 "holdout_accuracy": round(self.baseline.holdout_accuracy, 4),
                 "hint": "",
                 "reasons": "",
+                "focus": "",
+                "fixed": "",
+                "broken": "",
             }
         ]
         for record in self.rounds:
@@ -301,6 +469,9 @@ class ImprovementResult:
                     "holdout_accuracy": round(record.holdout_accuracy, 4),
                     "hint": record.hint,
                     "reasons": " | ".join(record.reasons),
+                    "focus": record.focus,
+                    "fixed": ", ".join(record.fixed),
+                    "broken": ", ".join(record.broken),
                 }
             )
         return rows
@@ -336,6 +507,9 @@ class AutoImprover:
         max_rounds: 最多试几个候选。
         patience: 连续几轮没有采纳就停。
         target_accuracy: 训练集与留出集都达到这个准确率就停。
+        vocabulary: 提示可以点名的表、列、指标与取值(见 :func:`build_vocabulary`)。
+            给了就在试跑前做具体性检查;为空则跳过。
+        focus_by_pattern: 每轮只给提议者一类错题,并要求提升落在这类题上。
     """
 
     evaluator: Evaluator
@@ -346,6 +520,8 @@ class AutoImprover:
     patience: int = 2
     target_accuracy: float = 0.9
     on_round: Callable[[RoundRecord], None] | None = None
+    vocabulary: Vocabulary = field(default_factory=Vocabulary)
+    focus_by_pattern: bool = True
 
     def run(
         self,
@@ -368,6 +544,7 @@ class AutoImprover:
         current, current_report = knowledge, baseline
 
         rejected: list[tuple[str, str]] = []
+        tried: set[str] = set()   # 本次循环里试过、没被采纳的失败形态
         if self.store is not None:
             self.store.ensure_tables()
             rejected = [
@@ -392,24 +569,32 @@ class AutoImprover:
             if not failures:
                 stop_reason = "no_train_failures"
                 break
+            focus = choose_focus((f.pattern for f in failures), tried) if self.focus_by_pattern else ""
+            shown = tuple(f for f in failures if f.pattern == focus) if focus else failures
+            counts = Counter(f.pattern for f in failures if f.pattern != focus)
             context = ProposalContext(
-                failures=failures,
+                failures=shown,
                 current_hints=current.hint_texts(),
                 rejected=tuple(rejected),
+                focus=focus,
+                other_patterns=tuple(counts.most_common()) if focus else (),
             )
+            targeted = tuple(f.case_id for f in shown) if focus else ()
 
             # ② 提议
             try:
                 proposal = self.proposer.propose(context)
             except LlmError as exc:
                 self._record(loop_id, number, "proposer_error", current, current_report,
-                             None, None, (str(exc)[:300],), generator_name, rounds)
+                             None, None, (str(exc)[:300],), generator_name, rounds, focus=focus)
                 stop_reason = "proposer_error"
                 break
 
             if proposal is None:
                 self._record(loop_id, number, "no_proposal", current, current_report,
-                             None, None, ("提议者没有给出合法的提议",), generator_name, rounds)
+                             None, None, ("提议者没有给出合法的提议",), generator_name, rounds,
+                             focus=focus)
+                tried.add(focus)
                 stale += 1
                 if stale >= self.patience:
                     stop_reason = "patience"
@@ -419,7 +604,22 @@ class AutoImprover:
             seen = {_normalize(h) for h in current.hint_texts()} | {_normalize(h) for h, _ in rejected}
             if _normalize(proposal.hint) and _normalize(proposal.hint) in seen:
                 self._record(loop_id, number, "duplicate", current, current_report,
-                             proposal, None, ("与已有提示或已被拒绝的提示重复",), generator_name, rounds)
+                             proposal, None, ("与已有提示或已被拒绝的提示重复",), generator_name, rounds,
+                             focus=focus)
+                tried.add(focus)
+                stale += 1
+                if stale >= self.patience:
+                    stop_reason = "patience"
+                    break
+                continue
+
+            # 便宜的检查先做:没点名任何具体对象的提示不值得花一次完整试跑
+            if self.vocabulary and not self.vocabulary.named_in(proposal.hint):
+                reason = "提示没有点名任何具体的表、列、取值或指标,试跑前拒绝(不花试跑成本)"
+                self._record(loop_id, number, "too_generic", current, current_report,
+                             proposal, None, (reason,), generator_name, rounds, focus=focus)
+                rejected.insert(0, (proposal.hint, reason))
+                tried.add(focus)
                 stale += 1
                 if stale >= self.patience:
                     stop_reason = "patience"
@@ -446,18 +646,22 @@ class AutoImprover:
             )
 
             # ④ 裁决
-            decision = improvement_gate(trial, current_report)
+            decision = improvement_gate(trial, current_report, targeted)
 
             # ⑤ 写状态
             if decision.accepted:
                 self._record(loop_id, number, "accepted", current, current_report,
-                             proposal, trial, decision.reasons, generator_name, rounds, candidate)
+                             proposal, trial, decision.reasons, generator_name, rounds, candidate,
+                             focus=focus)
                 current, current_report = candidate, trial
+                tried.clear()   # 知识变了,错题也变了,各类错都值得重新试
                 stale = 0
             else:
                 self._record(loop_id, number, "rejected", current, current_report,
-                             proposal, trial, decision.reasons, generator_name, rounds, candidate)
+                             proposal, trial, decision.reasons, generator_name, rounds, candidate,
+                             focus=focus)
                 rejected.insert(0, (proposal.hint, " | ".join(decision.reasons)))
+                tried.add(focus)
                 stale += 1
                 if stale >= self.patience:
                     stop_reason = "patience"
@@ -486,8 +690,11 @@ class AutoImprover:
         generator_name: str,
         rounds: list[RoundRecord],
         candidate: PromptKnowledge | None = None,
+        *,
+        focus: str = "",
     ) -> None:
         after = trial or baseline
+        fixed, broken = case_flips(baseline, trial) if trial is not None else ((), ())
         record = RoundRecord(
             round=number,
             decision=decision,
@@ -500,6 +707,9 @@ class AutoImprover:
             trial_run_id=trial.run_id if trial else "",
             rationale=proposal.rationale if proposal else "",
             targets=tuple(proposal.targets) if proposal else (),
+            focus=focus,
+            fixed=fixed,
+            broken=broken,
         )
         rounds.append(record)
         if self.on_round is not None:
@@ -529,5 +739,8 @@ class AutoImprover:
                 "proposer": getattr(self.proposer, "name", ""),
                 "generator": generator_name,
                 "knowledge_json": (candidate or parent).model_dump_json(),
+                "focus": focus,
+                "fixed": ",".join(fixed),
+                "broken": ",".join(broken),
             }
         )

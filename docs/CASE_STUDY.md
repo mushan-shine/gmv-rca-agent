@@ -522,6 +522,6 @@ token 不出现在任何可打印的地方。
 | 真实评估:0% → 63.6%(只补报告日历) | ✅ |
 | 自主改进循环在真实 workspace 上的迭代曲线 | ⏳ 待 `04` 运行 |
 
-`298 passed`。测试可切换运行目标,`--rca-target=spark` 即在 Databricks 上复核同一批断言。
+`312 passed`。测试可切换运行目标,`--rca-target=spark` 即在 Databricks 上复核同一批断言。
 
 代码入口:[README.md](../README.md) · 平台操作:[DATABRICKS_SETUP.md](DATABRICKS_SETUP.md)

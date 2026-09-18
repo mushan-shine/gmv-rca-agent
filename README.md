@@ -14,8 +14,9 @@ L2 评估（每次改动后）                                    ★ 项目核�
       标准答案由知识库**程序化生成**，不手工标注
 
 L3 自主改进（跨版本，无人值守）                          ★ 项目核心
-      读训练集失败 + 台账里被拒绝过的提示 → LLM 提议一条通用提示
-      → 带着它重跑评估 → 确定性闸门裁决（训练集多对 ≥1 道、留出集不退步）
+      读训练集失败 → 按失败形态分组，每轮只打一类 → LLM 针对这一类提议一条提示
+      → 没点名具体表/列/取值的空话：试跑前拒绝（省一次完整评估）
+      → 带着它重跑评估 → 确定性闸门裁决（训练集多对 ≥1 道且落在针对的题上、留出集不退步）
       → 采纳则版本 +1；拒绝则连同原因记进台账 → 下一轮提议时读到
 ```
 
@@ -33,11 +34,18 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs` / `nl2sql_improvement_ledger`)
 |---|---|---|---|---|---|
 | 1 | 基线 | 0% | 0% | 0% | 22 道题 SQL 跑通但返回空:模型用 `CURRENT_DATE()` 查了 2026 年,数据在 2025 年 |
 | 2 | + 报告日历(只改上下文) | **63.6%** | 50.0% | 50.0% | 自修复贡献 +13.6 个百分点;剩余错误中 5 道是维度取值写错(`market='Germany'`) |
-| 3+ | + 维度取值检查 + 自主改进循环 | 见 `notebooks/04` 的迭代曲线 | | | |
+| 3 | + 维度取值检查 + 自主改进循环(`04`) | 训练集 66.7% → 66.7%* | — | 80.0% → 80.0%* | 2 轮 0 条采纳:提议者两次都给出空话(「核对列名和取值」),各让训练集 14 → 12,**都被闸门挡下** |
+
+\* 第 3 行的准确率把「可答题答对」与「不可答题正确拒答」合在一起算,与前两行的口径不同。
 
 第 1 轮还暴露了评估系统自身的三个问题:回归闸门拿「永远正确」的参考生成器当基线、
 守卫在 DuckDB 方言下把 `DATEADD(day,…)` 的 `day` 误判为幻觉列、
 以及模型把拒答包进 ```sql 代码块时被误判为「该拒答没拒答」。三个都修了,并各有回归测试。
+
+第 3 轮说明了两件事。**裁决这一半起了作用**:提议者不可靠,但两条会让准确率下降的提示都没进知识库。
+**提议这一半没有**,于是加了三条机制:每轮只针对一类错题;没点名任何表、列、取值的提示在试跑前就拒掉,
+省下一次约 5 分钟的完整评估;总分上涨还必须落在它针对的题上,因为空话本身就让分数变了 2 道,
+在 21 道题的规模上这就是噪声量级。完整过程见 [docs/EXECUTION_LOG.md](docs/EXECUTION_LOG.md) 阶段 H。
 
 ---
 
@@ -75,6 +83,9 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs` / `nl2sql_improvement_ledger`)
 逐步操作(注册后点哪里、跑哪个 notebook、看什么输出、出错怎么查)见
 **[docs/DATABRICKS_SETUP.md](docs/DATABRICKS_SETUP.md)**。
 
+在 Databricks 上从零跑通的完整过程(每一步的作用、业务含义、遇到的 23 个问题及原因和解法),见
+**[docs/EXECUTION_LOG.md](docs/EXECUTION_LOG.md)**。
+
 想先了解这个项目在解决什么问题、为什么这么设计,读
 **[docs/CASE_STUDY.md](docs/CASE_STUDY.md)** —— 它把整套代码反推成一道系统设计题:
 题面、考点、实现思路、技术栈(含**不选**什么及原因)、架构、关键取舍。
@@ -88,7 +99,7 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs` / `nl2sql_improvement_ledger`)
 |---|---|---|
 | `notebooks/00_setup.py` | 建 5 张表 + 灌 8 周样例数据 + 自检 | `sessions_converted == completed_orders` |
 | `notebooks/01_decompose.py` | 确定性分解 + 闭合性断言 | 残差 ~`1e-12 %` |
-| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `168 passed` + `119 passed`(各 1 条 duckdb 专用被跳过) |
+| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `168 passed` + `133 passed`(各 1 条 duckdb 专用被跳过) |
 | `notebooks/03_nl2sql_loop.py` | **循环主线**:自修复 → 评估 → 改进 → 回归闸门 | `nl2sql_eval_runs` 里的指标序列 |
 | `notebooks/04_improvement_loop.py` | **自主改进循环**:LLM 提议 → 试跑 → 闸门裁决 → 台账,无人值守迭代 | 逐轮迭代曲线 + `nl2sql_improvement_ledger` |
 
@@ -296,6 +307,7 @@ gmv-rca-agent/
 │   └── 04_improvement_loop.py  # ★ 自主改进循环
 ├── docs/
 │   ├── CASE_STUDY.md           # ★ 场景题 + 设计思路 + 技术栈取舍 + 架构
+│   ├── EXECUTION_LOG.md        # ★ 执行记录:步骤、业务含义、问题与解法
 │   └── DATABRICKS_SETUP.md     # ★ 平台操作手册(点哪里、跑什么、怎么排查)
 ├── sql/setup/
 │   ├── render.py               # 生成器 -> .sql(产物,勿手改)
@@ -313,7 +325,7 @@ gmv-rca-agent/
     ├── test_llm.py                 # ★ 重试 / 缓存 / 预算 / 凭据不泄漏
     ├── test_nl2sql_units.py        # ★ 守卫 / 比对器 / 评估集 / 改进 / 回归闸门
     ├── test_nl2sql_loop.py         # ★ 自修复、评估器自检、状态表、改进闭环
-    ├── test_improve.py             # ★ 自主循环:采纳/拒绝/重复、留出集不可见、跨循环记忆
+    ├── test_improve.py             # ★ 自主循环:采纳/拒绝/重复/空话、留出集不可见、跨循环记忆、归因
     └── conftest.py                 #   --rca-target 决定整套测试跑在哪个引擎上
 ```
 
@@ -330,7 +342,7 @@ gmv-rca-agent/
 | 5 | 全程不使用 LLM | 全仓无任何模型调用 | ✅ |
 
 ```
-298 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
+312 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
 ```
 
 ⚠ **尚未在真实 workspace 上执行过。** 第 3 层验证的代码已就位

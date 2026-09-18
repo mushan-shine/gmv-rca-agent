@@ -19,6 +19,15 @@
 # MAGIC 一次只改一个变量:每轮只加一条提示,模型、评估集、循环配置都不变。
 # MAGIC 所以台账里每一行的指标差值,都能归因到那一条提示上。
 # MAGIC
+# MAGIC **第一次真实运行之后加的三条机制**(glm-4-flash 两轮都提了「Always verify column names…」
+# MAGIC 这种空话,各让训练集 14 → 12,被闸门拒绝):
+# MAGIC
+# MAGIC | 机制 | 做什么 | 为什么 |
+# MAGIC |---|---|---|
+# MAGIC | 按失败形态分组 | 每轮只给提议者**一类**错题(维度取值 / 该拒答没拒答 / 数值错 …),没采纳就换下一类 | 7 道各不相同的错题一起给,只能得到放之四海皆准的空话 |
+# MAGIC | 具体性检查 | 提示没点名任何表、列、取值或指标 → **试跑前**拒绝,记为 `too_generic` | 一次试跑约 37 次调用、4~5 分钟,不该花在空话上 |
+# MAGIC | 归因检查 | 总分 +1 还不够,这一轮**针对的那类错题**里至少修好一道 | 空话也让分数变了 2 道 —— 21 道题上,±2 是噪声量级 |
+# MAGIC
 # MAGIC **耗时:** 基线一次评估 + 每轮一次评估,每次约 3~5 分钟。默认最多 4 轮,总计约 15~25 分钟。
 
 # COMMAND ----------
@@ -42,6 +51,7 @@ dbutils.widgets.text("schema", "gmv_rca", "Schema")
 dbutils.widgets.dropdown("llm_provider", "zhipu", ["zhipu", "databricks"], "LLM 供应商")
 dbutils.widgets.text("endpoint", "databricks-meta-llama-3-3-70b-instruct", "Databricks 端点名")
 dbutils.widgets.text("zhipu_model", "glm-4-flash", "智谱模型")
+dbutils.widgets.text("proposer_model", "", "提议者模型(留空=同上)")
 dbutils.widgets.text("secret_scope", "llm", "Secret scope")
 dbutils.widgets.text("secret_key", "zhipu_api_key", "Secret key")
 dbutils.widgets.text("max_rounds", "4", "最多几轮")
@@ -54,6 +64,7 @@ SCHEMA = dbutils.widgets.get("schema")
 PROVIDER = dbutils.widgets.get("llm_provider")
 ENDPOINT = dbutils.widgets.get("endpoint").strip()
 ZHIPU_MODEL = dbutils.widgets.get("zhipu_model").strip()
+PROPOSER_MODEL = dbutils.widgets.get("proposer_model").strip()
 SECRET_SCOPE = dbutils.widgets.get("secret_scope").strip()
 SECRET_KEY = dbutils.widgets.get("secret_key").strip()
 MAX_ROUNDS = int(dbutils.widgets.get("max_rounds"))
@@ -67,7 +78,7 @@ from rca.nl2sql.cases import load_cases, validate_cases
 from rca.nl2sql.domains import load_value_domains
 from rca.nl2sql.evaluate import Evaluator
 from rca.nl2sql.generate import LlmSqlGenerator
-from rca.nl2sql.improve import AutoImprover, LlmHintProposer
+from rca.nl2sql.improve import AutoImprover, LlmHintProposer, build_vocabulary, failure_pattern
 from rca.nl2sql.knowledge_store import load_prompt_knowledge, save_prompt_knowledge
 from rca.nl2sql.llm import (
     ZHIPU_BASE_URL,
@@ -103,6 +114,7 @@ print(f"循环参数:最多 {MAX_ROUNDS} 轮 · 连续 {PATIENCE} 轮不采纳�
 # COMMAND ----------
 
 chat_client = None
+proposer_client = None   # 留空 proposer_model 时与 chat_client 相同
 
 if PROVIDER == "databricks":
     from databricks.sdk import WorkspaceClient
@@ -117,6 +129,13 @@ if PROVIDER == "databricks":
             base_url=f"{host}/serving-endpoints", api_key=token, model=ENDPOINT,
             temperature=0.0, max_tokens=1024,
         )
+        if PROPOSER_MODEL and PROPOSER_MODEL in endpoints:
+            proposer_client = OpenAIChatClient(
+                base_url=f"{host}/serving-endpoints", api_key=token, model=PROPOSER_MODEL,
+                temperature=0.0, max_tokens=1024,
+            )
+        elif PROPOSER_MODEL:
+            print(f"✗ 提议者端点 {PROPOSER_MODEL!r} 不存在,提议者改用 {ENDPOINT}")
     else:
         print(f"✗ 端点 {ENDPOINT!r} 不存在。可用端点:{endpoints}")
 else:
@@ -128,6 +147,11 @@ else:
                 {}, provider="zhipu", api_key=dbutils.secrets.get(SECRET_SCOPE, SECRET_KEY),
                 model=ZHIPU_MODEL, cache=False,
             )
+            if PROPOSER_MODEL:
+                proposer_client = build_chat_client(
+                    {}, provider="zhipu", api_key=dbutils.secrets.get(SECRET_SCOPE, SECRET_KEY),
+                    model=PROPOSER_MODEL, cache=False,
+                )
         except LlmError as exc:
             print(f"✗ {exc}")
         except Exception as exc:  # noqa: BLE001
@@ -137,6 +161,12 @@ assert chat_client is not None, "LLM 没有接通,自主循环无法运行。先
 
 probe = chat_client.complete("Reply with exactly: SELECT 1")
 print(f"冒烟测试通过:模型 {probe.model} · {probe.latency_ms} ms")
+
+proposer_client = proposer_client or chat_client
+if proposer_client is not chat_client:
+    probe = proposer_client.complete("Reply with exactly: OK")
+    print(f"提议者冒烟测试通过:模型 {probe.model} · {probe.latency_ms} ms")
+print(f"生成 SQL 的模型:{chat_client.model} · 提议改进的模型:{proposer_client.model}")
 
 # COMMAND ----------
 
@@ -167,9 +197,13 @@ for column, values in sorted(domains.values.items()):
 usage = UsageMeter(max_calls=MAX_CALLS)                    # 生成器与提议者共用一个预算
 cached_client = CachingChatClient(chat_client)
 generator = LlmSqlGenerator(cached_client, meter=usage)
-proposer = LlmHintProposer(cached_client, meter=usage)
+proposer = LlmHintProposer(CachingChatClient(proposer_client), meter=usage)
 store = StateStore(target.executor, target.dialect)
 store.ensure_tables()                                      # 旧表缺的列会在这里自动补上
+
+# 具体性检查用的词表:表名、列名、指标、维度,以及上一步查出来的维度取值
+vocabulary = build_vocabulary(knowledge, domains)
+print(f"具体性检查词表:{len(vocabulary.identifiers)} 个表/列/指标名 · {len(vocabulary.values)} 个维度取值")
 
 
 def loop_factory(candidate_knowledge):
@@ -198,12 +232,17 @@ evaluator = Evaluator(
 
 
 def show_round(record):
-    mark = {"accepted": "✓ 采纳", "rejected": "✗ 拒绝", "duplicate": "↺ 重复", "no_proposal": "∅ 无提议"}.get(
-        record.decision, record.decision
-    )
-    print(f"\n── 第 {record.round} 轮  {mark}  训练集 {record.train_accuracy:.1%} · 留出集 {record.holdout_accuracy:.1%}")
+    mark = {
+        "accepted": "✓ 采纳", "rejected": "✗ 拒绝", "duplicate": "↺ 重复",
+        "no_proposal": "∅ 无提议", "too_generic": "⊘ 太笼统(未试跑)",
+    }.get(record.decision, record.decision)
+    tried = record.trial_run_id != ""
+    score = f"训练集 {record.train_accuracy:.1%} · 留出集 {record.holdout_accuracy:.1%}" if tried else "未试跑"
+    print(f"\n── 第 {record.round} 轮  {mark}  针对 {record.focus or '-'}  {score}")
     if record.hint:
         print(f"   提示:{record.hint}")
+    if tried:
+        print(f"   修好:{', '.join(record.fixed) or '-'}   改坏:{', '.join(record.broken) or '-'}")
     for reason in record.reasons:
         print(f"   原因:{reason}")
     print(f"   累计用量:{usage.summary()}")
@@ -218,6 +257,7 @@ improver = AutoImprover(
     patience=PATIENCE,
     target_accuracy=TARGET,
     on_round=show_round,
+    vocabulary=vocabulary,
 )
 
 rejected_before = store.rejected_hints(generator.name)
@@ -263,7 +303,7 @@ display(spark.createDataFrame(result.curve()))
 # COMMAND ----------
 
 display(spark.sql(f"""
-    SELECT loop_id, round, decision, hint, reasons,
+    SELECT loop_id, round, decision, focus, hint, reasons, fixed, broken,
            train_before, train_after, holdout_before, holdout_after,
            parent_version, candidate_version, trial_run_id, prompt_fingerprint, created_at
     FROM {CATALOG}.{SCHEMA}.nl2sql_improvement_ledger
@@ -285,18 +325,19 @@ if result.accepted:
 else:
     print("这次没有采纳任何提示。")
 
-print("最终仍然答错的题:")
-for failure in result.final.failures:
+print("最终仍然答错的题(按失败形态):")
+for failure in sorted(result.final.failures, key=failure_pattern):
     scope = "留出" if failure.holdout else "训练"
-    print(f"  [{scope}] [{failure.verdict:<20}] {failure.case_id}")
-    print(f"        {failure.detail[:150]}")
+    print(f"  [{scope}] [{failure_pattern(failure):<16}] {failure.case_id}")
+    print(f"        {failure.detail[:200]}")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 8. 提议者最后一轮看到的 prompt(透明度)
 # MAGIC
-# MAGIC 可以确认两件事:里面**没有留出集的题**,也**没有参考 SQL**。
+# MAGIC 可以确认三件事:里面**没有留出集的题**,**没有参考 SQL**,
+# MAGIC 以及以往被拒绝的提示(含 `too_generic`)都列在「Previously rejected」里。
 
 # COMMAND ----------
 

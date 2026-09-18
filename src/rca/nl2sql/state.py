@@ -102,6 +102,9 @@ LEDGER_SCHEMA: dict[str, str] = {
     "proposer": "string",
     "generator": "string",
     "knowledge_json": "string",
+    "focus": "string",
+    "fixed": "string",
+    "broken": "string",
     "created_at": "timestamp",
 }
 """自主改进循环的台账:**每一个候选**(采纳的、拒绝的、重复的)都记一行。
@@ -220,7 +223,7 @@ class StateStore:
         """
         return self.executor.run(
             f"SELECT hint, reasons, loop_id, round FROM {self.dialect.qualify(LEDGER_TABLE)}"
-            f" WHERE decision = 'rejected' AND hint <> ''"
+            f" WHERE decision IN ('rejected', 'too_generic') AND hint <> ''"
             f"   AND generator = {SqlDialect.string_literal(generator)}"
             f" ORDER BY created_at DESC LIMIT {int(limit)}"
         )

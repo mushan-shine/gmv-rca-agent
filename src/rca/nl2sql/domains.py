@@ -36,6 +36,9 @@ from ..warehouse import SqlExecutor
 
 DEFAULT_MAX_CARDINALITY = 50
 
+VIOLATION_MARKER = "没有取值"
+"""每条取值违规反馈都含这几个字。改进循环据此把失败归到「维度取值」一类。"""
+
 
 @dataclass(frozen=True)
 class ValueDomains:
@@ -81,12 +84,12 @@ class ValueDomains:
         same_but_case = [value for value in allowed if value.lower() == literal.lower()]
         if same_but_case:
             return (
-                f"列 {column} 没有取值 '{literal}'(注意大小写,实际是 '{same_but_case[0]}')。"
+                f"列 {column} {VIOLATION_MARKER} '{literal}'(注意大小写,实际是 '{same_but_case[0]}')。"
                 f"{column} 的全部取值:{shown}。"
             )
         elsewhere = self.columns_containing(literal)
         hint = f"'{literal}' 实际出现在列:{', '.join(elsewhere)}。" if elsewhere else ""
-        return f"列 {column} 没有取值 '{literal}'。{column} 的全部取值:{shown}。{hint}"
+        return f"列 {column} {VIOLATION_MARKER} '{literal}'。{column} 的全部取值:{shown}。{hint}"
 
     def columns_containing(self, literal: str) -> list[str]:
         """哪些列里有这个值(不区分大小写)。
