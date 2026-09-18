@@ -91,7 +91,7 @@ assert offline == 0, "离线测试未通过 —— 先修这些,不要急着连�
 # MAGIC * **自主改进循环** —— 提议、裁决、台账、跨循环记忆、维度取值检查(`test_improve.py`)
 # MAGIC * **问答助手** —— 归因数字与直接 SQL 一致、查数走自修复、失败与 👎 进待复核队列(`test_assistant.py`)
 # MAGIC
-# MAGIC **期望:`142 passed, 1 skipped`**(跳过的那条是 duckdb 专用)
+# MAGIC **期望:`143 passed, 1 skipped`**(跳过的那条是 duckdb 专用)
 # MAGIC
 # MAGIC ⚠ 第一次跑要等 serverless 计算启动,可能一两分钟。
 

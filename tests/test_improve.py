@@ -557,3 +557,29 @@ def test_proposer_prompt_shows_only_the_focused_pattern():
     assert "SPECIFIC" in prompt
     assert "missed_refusal: 2 question(s)" in prompt, "别的错只给数量,不给细节"
     assert REAL_VAGUE_HINTS[0] in prompt, "被判为空话的提示也要告诉提议者"
+
+
+def test_old_state_tables_are_migrated_not_dropped(target, store):
+    """workspace 里的台账是上一版代码建的,缺新加的列。补列,不删表 —— 里面是循环的记忆。"""
+    from rca.nl2sql.state import LEDGER_SCHEMA, LEDGER_TABLE, _create_table_sql, _insert_sql
+
+    new_columns = {"focus", "fixed", "broken"}
+    old_schema = {k: v for k, v in LEDGER_SCHEMA.items() if k not in new_columns}
+    table = target.dialect.qualify(LEDGER_TABLE)
+    target.executor.run(f"DROP TABLE IF EXISTS {table}")
+    target.executor.run(_create_table_sql(LEDGER_TABLE, old_schema, target.dialect))
+    target.executor.run(_insert_sql(
+        LEDGER_TABLE, old_schema,
+        [{"loop_id": "loop_legacy", "round": 1, "decision": "rejected", "hint": "an old rejected rule",
+          "generator": "gen-legacy", "created_at": "2026-09-01 00:00:00"}],
+        target.dialect,
+    ))
+
+    store.ensure_tables()
+
+    assert new_columns <= store._existing_columns(LEDGER_TABLE)
+    assert [row["hint"] for row in store.rejected_hints("gen-legacy")] == ["an old rejected rule"], \
+        "旧的拒绝记录必须还在"
+    store.record_ledger({"loop_id": "loop_after_migration", "round": 1, "decision": "rejected",
+                         "hint": "x", "focus": "wrong_value", "generator": "gen-legacy"})
+    assert store.ledger("loop_after_migration")[0]["focus"] == "wrong_value"

@@ -523,10 +523,13 @@ def test_improvement_loop_closes(knowledge, target, make_loop, cases, store):
         failing_cases=store.cases_needing_help(baseline.run_id),
         reference_sql=reference_sql_map(weak),
         questions=question_map(subset),
-        max_examples=3,
+        max_examples=10,     # 足够大:留出集那道题没被加进去,只能是因为它被排除了
     )
     assert not improvement.is_empty
     assert improvement.knowledge.version == 2
+    holdout_ids = {c.id for c in subset if c.holdout}
+    assert holdout_ids and not holdout_ids & set(reference_sql_map(weak)),         "留出集的参考 SQL 进了 few-shot,下一次评估这道题就是在抄答案"
+    assert not holdout_ids & {example.fixes_case for example in improvement.knowledge.examples}
     for example in improvement.knowledge.examples:
         assert example.source_run == baseline.run_id
         assert example.fixes_case, "每条新增示例都要说清是为哪条 case 加的"

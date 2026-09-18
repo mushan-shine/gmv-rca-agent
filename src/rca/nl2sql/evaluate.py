@@ -456,11 +456,16 @@ def regression_gate(
 
 
 def reference_sql_map(evaluator: Evaluator) -> dict[str, str]:
-    """case_id -> 参考 SQL。改进循环拿它做 few-shot 示例的正确答案。"""
+    """case_id -> 参考 SQL。改进循环拿它做 few-shot 示例的正确答案。
+
+    **不含留出集。** 留出集答错时,它的参考 SQL 一旦进了 few-shot,
+    下一次评估里这道题就是在抄答案 —— 留出集指标会变好,而且好得毫无意义。
+    """
+    holdout = {case.id for case in evaluator.cases if case.holdout}
     return {
         case_id: golden.reference_sql
         for case_id, golden in evaluator.goldens().items()
-        if golden.answerable
+        if golden.answerable and case_id not in holdout
     }
 
 

@@ -207,7 +207,7 @@ sessions_converted   14416          ← 必须与上一行相等
 
 ```
 198 passed, 1 skipped     ← 第 1 段:离线部分
-142 passed, 1 skipped     ← 第 2 段:跑在 Spark 上
+143 passed, 1 skipped     ← 第 2 段:跑在 Spark 上
 因子分解残差      -1.074e-12 %   (要求 < 0.1%)
 维度分解最大残差   1.440e-13 %   (要求 < 0.1%)
 ```

@@ -86,6 +86,9 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs` / `nl2sql_improvement_ledger`)
 在 Databricks 上从零跑通的完整过程(每一步的作用、业务含义、遇到的 23 个问题及原因和解法),见
 **[docs/EXECUTION_LOG.md](docs/EXECUTION_LOG.md)**。
 
+想弄懂整个系统怎么运行:**[docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)**(需求,每条带实现状态与验证测试)和
+**[docs/DESIGN.md](docs/DESIGN.md)**(按模块的实现设计,附四个端到端例子)。
+
 想把它当成真正可用的问答助手(网页入口、定时任务、上线后的循环),见
 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**。
 
@@ -102,7 +105,7 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs` / `nl2sql_improvement_ledger`)
 |---|---|---|
 | `notebooks/00_setup.py` | 建 5 张表 + 灌 8 周样例数据 + 自检 | `sessions_converted == completed_orders` |
 | `notebooks/01_decompose.py` | 确定性分解 + 闭合性断言 | 残差 ~`1e-12 %` |
-| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `198 passed` + `142 passed`(各 1 条 duckdb 专用被跳过) |
+| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `198 passed` + `143 passed`(各 1 条 duckdb 专用被跳过) |
 | `notebooks/03_nl2sql_loop.py` | **循环主线**:自修复 → 评估 → 改进 → 回归闸门 | `nl2sql_eval_runs` 里的指标序列 |
 | `notebooks/04_improvement_loop.py` | **自主改进循环**:LLM 提议 → 试跑 → 闸门裁决 → 台账,无人值守迭代 | 逐轮迭代曲线 + `nl2sql_improvement_ledger` |
 | `notebooks/05_assistant.py` | **问答助手**:改一个输入框就能提问;「为什么」走确定性归因,其余走查数 | 结论 + 假设 + 明细 + SQL,写进 `assistant_requests` |
@@ -339,6 +342,8 @@ gmv-rca-agent/
 ├── docs/
 │   ├── CASE_STUDY.md           # ★ 场景题 + 设计思路 + 技术栈取舍 + 架构
 │   ├── EXECUTION_LOG.md        # ★ 执行记录:步骤、业务含义、问题与解法
+│   ├── REQUIREMENTS.md         # ★ 需求文档:目标、用户故事、功能/非功能需求、验收
+│   ├── DESIGN.md               # ★ 实现设计:分层架构、15 个模块、四个端到端例子
 │   ├── DEPLOYMENT.md           # ★ 上线指南:入口、部署、权限、上线后的循环
 │   └── DATABRICKS_SETUP.md     # ★ 平台操作手册(点哪里、跑什么、怎么排查)
 ├── sql/setup/
@@ -376,7 +381,7 @@ gmv-rca-agent/
 | 5 | 全程不使用 LLM | 全仓无任何模型调用 | ✅ |
 
 ```
-351 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
+352 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
 ```
 
 ⚠ **尚未在真实 workspace 上执行过。** 第 3 层验证的代码已就位
