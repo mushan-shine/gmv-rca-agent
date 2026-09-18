@@ -1,0 +1,27 @@
+# Databricks Apps 的启动配置。App 的源码目录是**仓库根**(需要 src/ 与 knowledge/)。
+#
+# 创建 App 时在 Resources 里添加两个资源,资源键要和下面 valueFrom 一致:
+#   sql-warehouse   类型 SQL warehouse,权限 Can use
+#   llm-api-key     类型 Secret,指向 llm/zhipu_api_key,权限 Can read(不接 LLM 可以不加,归因照常可用)
+#
+# 这里没有、也不应该有任何密钥或 token:
+#   仓库连接用 App 自己的 service principal(Apps 自动注入 OAuth 凭据),
+#   LLM 密钥从 secret 资源注入成环境变量,不出现在代码和日志里。
+command: ["streamlit", "run", "app/app.py", "--server.headless", "true"]
+
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: DATABRICKS_CATALOG
+    value: workspace
+  - name: DATABRICKS_SCHEMA
+    value: gmv_rca
+  # 「上周」相对于哪一天。样例数据是历史快照,留空取样例数据的报告日;接真实数据时改成 today
+  - name: RCA_AS_OF
+    value: ""
+  - name: RCA_LLM_PROVIDER
+    value: zhipu
+  - name: RCA_LLM_MODEL
+    value: glm-4-flash
+  - name: RCA_LLM_API_KEY
+    valueFrom: llm-api-key

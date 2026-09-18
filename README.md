@@ -86,6 +86,9 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs` / `nl2sql_improvement_ledger`)
 在 Databricks 上从零跑通的完整过程(每一步的作用、业务含义、遇到的 23 个问题及原因和解法),见
 **[docs/EXECUTION_LOG.md](docs/EXECUTION_LOG.md)**。
 
+想把它当成真正可用的问答助手(网页入口、定时任务、上线后的循环),见
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**。
+
 想先了解这个项目在解决什么问题、为什么这么设计,读
 **[docs/CASE_STUDY.md](docs/CASE_STUDY.md)** —— 它把整套代码反推成一道系统设计题:
 题面、考点、实现思路、技术栈(含**不选**什么及原因)、架构、关键取舍。
@@ -99,9 +102,10 @@ Delta 表(`nl2sql_attempts` / `nl2sql_eval_runs` / `nl2sql_improvement_ledger`)
 |---|---|---|
 | `notebooks/00_setup.py` | 建 5 张表 + 灌 8 周样例数据 + 自检 | `sessions_converted == completed_orders` |
 | `notebooks/01_decompose.py` | 确定性分解 + 闭合性断言 | 残差 ~`1e-12 %` |
-| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `168 passed` + `133 passed`(各 1 条 duckdb 专用被跳过) |
+| `notebooks/02_run_tests.py` | **在 Databricks 上**跑整套验收测试 | `198 passed` + `142 passed`(各 1 条 duckdb 专用被跳过) |
 | `notebooks/03_nl2sql_loop.py` | **循环主线**:自修复 → 评估 → 改进 → 回归闸门 | `nl2sql_eval_runs` 里的指标序列 |
 | `notebooks/04_improvement_loop.py` | **自主改进循环**:LLM 提议 → 试跑 → 闸门裁决 → 台账,无人值守迭代 | 逐轮迭代曲线 + `nl2sql_improvement_ledger` |
+| `notebooks/05_assistant.py` | **问答助手**:改一个输入框就能提问;「为什么」走确定性归因,其余走查数 | 结论 + 假设 + 明细 + SQL,写进 `assistant_requests` |
 
 `03` 的第 2 格会**自动探测你的 workspace 有没有可用的 LLM 端点**,有就直接用
 (走 workspace 内的 serving 端点,请求不出 Databricks)。没有也能跑完整条流水线 ——
@@ -125,6 +129,24 @@ pytest -q                          # duckdb,约 7 秒
 pytest -q --rca-target=spark       # 在 Databricks notebook 里(见 02_run_tests.py)
 pytest -q --rca-target=databricks  # 从本机连 warehouse
 ```
+
+---
+
+## 上线形态:同一份代码,三个入口
+
+```
+网页聊天(app/app.py,Databricks Apps) ┐
+notebook(notebooks/05_assistant.py)   ├─→ rca.assistant:问题分流
+定时 Job(databricks.yml)             ┘        ├─ 「为什么……」→ 确定性归因(不经 LLM,残差可验证)
+                                                └─ 其他       → text-to-SQL 自修复循环
+                                          → 结论 + 假设 + 明细 + SQL + 👍👎 → assistant_requests
+                                          → 失败 / 👎 → 待复核队列 → eval/cases.yaml → 03 / 04
+```
+
+**回答里没有一个数字是模型写的。** 归因走分解内核,叙述由模板生成;
+LLM 只用来把自由问法翻译成 SQL。线上失败和被点 👎 的问题进入待复核队列,
+人确认口径后变成新的评估题 —— 评估集从线上真实问题里长大。
+部署步骤见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
 
 ---
 
@@ -275,9 +297,13 @@ gmv-rca-agent/
 ├── knowledge/                  # Git 是唯一真源
 │   ├── tables.yaml             #   schema 登记簿(DDL 与校验都由它驱动)
 │   ├── dimensions.yaml         #   维度注册表 + 全局钻取优先级(L3 将来只改这里)
-│   └── metrics/                #   gmv / orders / uv / cvr / aov
+│   ├── metrics/                #   gmv / orders / uv / cvr / aov
+│   └── assistant/synonyms.yaml #   业务口语 → 指标 / 维度取值(问答助手的分流词表)
 ├── eval/cases.yaml             # ★ 26 条评估 case(含 4 条不可答对照组、5 条留出集)
 ├── src/rca/
+│   ├── assistant/              # ★ 线上问答助手
+│   │   ├── router.py           #     问题分流:查数 / 归因(确定性)
+│   │   └── service.py          #     回答装配、模板叙述、问答日志与反馈
 │   ├── nl2sql/                 # ★ 循环主线
 │   │   ├── generate.py         #     生成器接口 + Reference/Scripted/LLM 实现 + prompt 构造
 │   │   ├── llm.py              #     LLM 客户端:多供应商 / 重试 / 缓存 / 预算熔断
@@ -304,10 +330,16 @@ gmv-rca-agent/
 │   ├── 01_decompose.py         #   确定性分解 + 闭合性断言
 │   ├── 02_run_tests.py         #   在 Databricks 上跑整套验收测试
 │   ├── 03_nl2sql_loop.py       # ★ 循环主线
-│   └── 04_improvement_loop.py  # ★ 自主改进循环
+│   ├── 04_improvement_loop.py  # ★ 自主改进循环
+│   └── 05_assistant.py         # ★ 问答助手(notebook 入口,也被每周归因 Job 调用)
+├── app/app.py                  # ★ 问答助手(网页入口,Streamlit / Databricks Apps)
+├── app.yaml                    #   Databricks Apps 启动配置(无任何密钥)
+├── databricks.yml              #   三个定时 Job:每日评估 / 每周改进 / 每周归因
+├── requirements.txt            #   Databricks Apps 依赖
 ├── docs/
 │   ├── CASE_STUDY.md           # ★ 场景题 + 设计思路 + 技术栈取舍 + 架构
 │   ├── EXECUTION_LOG.md        # ★ 执行记录:步骤、业务含义、问题与解法
+│   ├── DEPLOYMENT.md           # ★ 上线指南:入口、部署、权限、上线后的循环
 │   └── DATABRICKS_SETUP.md     # ★ 平台操作手册(点哪里、跑什么、怎么排查)
 ├── sql/setup/
 │   ├── render.py               # 生成器 -> .sql(产物,勿手改)
@@ -326,6 +358,8 @@ gmv-rca-agent/
     ├── test_nl2sql_units.py        # ★ 守卫 / 比对器 / 评估集 / 改进 / 回归闸门
     ├── test_nl2sql_loop.py         # ★ 自修复、评估器自检、状态表、改进闭环
     ├── test_improve.py             # ★ 自主循环:采纳/拒绝/重复/空话、留出集不可见、跨循环记忆、归因
+    ├── test_assistant_router.py    #   问题分流:意图、指标、过滤、窗口(不需要数据库)
+    ├── test_assistant.py           # ★ 助手端到端:归因数字 = 直接 SQL、查数自修复、待复核队列
     └── conftest.py                 #   --rca-target 决定整套测试跑在哪个引擎上
 ```
 
@@ -342,7 +376,7 @@ gmv-rca-agent/
 | 5 | 全程不使用 LLM | 全仓无任何模型调用 | ✅ |
 
 ```
-312 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
+351 passed        # pytest -q(duckdb);--rca-target=spark 跑同一批,少 1 条 duckdb_only
 ```
 
 ⚠ **尚未在真实 workspace 上执行过。** 第 3 层验证的代码已就位

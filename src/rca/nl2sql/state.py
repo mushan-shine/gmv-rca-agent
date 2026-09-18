@@ -31,6 +31,8 @@ from ..warehouse import SqlExecutor
 ATTEMPTS_TABLE = "nl2sql_attempts"
 EVAL_RUNS_TABLE = "nl2sql_eval_runs"
 LEDGER_TABLE = "nl2sql_improvement_ledger"
+REQUESTS_TABLE = "assistant_requests"
+FEEDBACK_TABLE = "assistant_feedback"
 
 # 列名 -> 逻辑类型。顺序即建表顺序,也是 INSERT 的列顺序。
 ATTEMPTS_SCHEMA: dict[str, str] = {
@@ -112,6 +114,32 @@ LEDGER_SCHEMA: dict[str, str] = {
 被拒绝的候选是这张表最重要的内容 —— 下一次提议时读到它们,就不会反复提同一个无效修改。
 这是「下一轮读取上一轮写下的状态」最直接的落点。"""
 
+REQUESTS_SCHEMA: dict[str, str] = {
+    "request_id": "string",
+    "created_at": "timestamp",
+    "question": "string",
+    "intent": "string",
+    "status": "string",
+    "answer": "string",
+    "sql": "string",
+    "notes": "string",
+    "attempts": "int",
+    "model": "string",
+    "tokens": "int",
+    "latency_ms": "int",
+    "knowledge_version": "string",
+    "detail": "string",
+}
+"""线上问答日志:每个真实问题一行。失败的问题是扩充评估集最好的来源。"""
+
+FEEDBACK_SCHEMA: dict[str, str] = {
+    "request_id": "string",
+    "created_at": "timestamp",
+    "rating": "int",
+    "comment": "string",
+}
+"""提问人的 👍(1)/ 👎(-1)。答出来了但被点 👎 的,是评估器发现不了的错。"""
+
 
 def _literal(value: Any, logical_type: str, dialect: SqlDialect) -> str:
     if value is None:
@@ -185,6 +213,8 @@ class StateStore:
             (ATTEMPTS_TABLE, ATTEMPTS_SCHEMA),
             (EVAL_RUNS_TABLE, EVAL_RUNS_SCHEMA),
             (LEDGER_TABLE, LEDGER_SCHEMA),
+            (REQUESTS_TABLE, REQUESTS_SCHEMA),
+            (FEEDBACK_TABLE, FEEDBACK_SCHEMA),
         ):
             self.executor.run(_create_table_sql(table, schema, self.dialect))
             existing = self._existing_columns(table)
@@ -227,6 +257,46 @@ class StateStore:
             f"   AND generator = {SqlDialect.string_literal(generator)}"
             f" ORDER BY created_at DESC LIMIT {int(limit)}"
         )
+
+    # -- 线上问答 ------------------------------------------------------------
+    def record_request(self, row: Mapping[str, Any]) -> None:
+        stamped = {**row, "created_at": row.get("created_at") or datetime.now(timezone.utc)}
+        self.executor.run(_insert_sql(REQUESTS_TABLE, REQUESTS_SCHEMA, [stamped], self.dialect))
+
+    def record_feedback(self, request_id: str, rating: int, comment: str = "") -> None:
+        row = {
+            "request_id": request_id,
+            "created_at": datetime.now(timezone.utc),
+            "rating": rating,
+            "comment": comment[:1000],
+        }
+        self.executor.run(_insert_sql(FEEDBACK_TABLE, FEEDBACK_SCHEMA, [row], self.dialect))
+
+    def review_queue(self, limit: int = 50) -> list[dict[str, Any]]:
+        """待复核的线上问题:没答出来的,以及答出来但被点了 👎 的。
+
+        人逐条确认正确口径,把值得收的写进 ``eval/cases.yaml`` ——
+        评估集由此从线上真实问题里长大。
+        """
+        requests = self.dialect.qualify(REQUESTS_TABLE)
+        feedback = self.dialect.qualify(FEEDBACK_TABLE)
+        return self.executor.run(
+            f"SELECT r.request_id, r.created_at, r.question, r.intent, r.status, r.detail,"
+            f" f.rating, f.comment"
+            f" FROM {requests} r"
+            f" LEFT JOIN (SELECT request_id, MIN(rating) AS rating, MAX(comment) AS comment"
+            f"            FROM {feedback} GROUP BY request_id) f"
+            f"   ON r.request_id = f.request_id"
+            f" WHERE r.status IN ('failed', 'error') OR f.rating < 0"
+            f" ORDER BY r.created_at DESC LIMIT {int(limit)}"
+        )
+
+    def request(self, request_id: str) -> dict[str, Any] | None:
+        rows = self.executor.run(
+            f"SELECT * FROM {self.dialect.qualify(REQUESTS_TABLE)}"
+            f" WHERE request_id = {SqlDialect.string_literal(request_id)}"
+        )
+        return rows[0] if rows else None
 
     def ledger(self, loop_id: str) -> list[dict[str, Any]]:
         return self.executor.run(

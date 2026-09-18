@@ -134,3 +134,35 @@ def test_duckdb_target_is_clearly_local():
         assert target.dialect.qualify("fact_orders") == "main.fact_orders"
     finally:
         target.close()
+
+
+def test_app_executor_uses_oauth_not_a_personal_token(monkeypatch):
+    """Databricks Apps 里用 App 的 service principal 连仓库,不经手任何个人 token。"""
+    import sys
+    import types
+
+    from rca.warehouse import DatabricksExecutor
+
+    captured: dict = {}
+    fake_sql = types.ModuleType("databricks.sql")
+    fake_sql.connect = lambda **kwargs: captured.update(kwargs) or object()
+    fake_pkg = types.ModuleType("databricks")
+    fake_pkg.sql = fake_sql
+    monkeypatch.setitem(sys.modules, "databricks", fake_pkg)
+    monkeypatch.setitem(sys.modules, "databricks.sql", fake_sql)
+
+    provider = lambda: (lambda: {"Authorization": "Bearer from-oauth"})  # noqa: E731
+    DatabricksExecutor("host", "/sql/1.0/warehouses/abc", credentials_provider=provider)._connect()
+    assert captured["credentials_provider"] is provider
+    assert "access_token" not in captured
+
+    captured.clear()
+    DatabricksExecutor("host", "/sql/1.0/warehouses/abc", access_token="pat")._connect()
+    assert captured["access_token"] == "pat" and "credentials_provider" not in captured
+
+
+def test_app_target_requires_a_warehouse_resource():
+    from rca.config import build_app_target
+
+    with pytest.raises(ConfigError, match="sql-warehouse"):
+        build_app_target(env={})

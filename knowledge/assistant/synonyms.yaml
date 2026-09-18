@@ -1,0 +1,43 @@
+# 问答助手的业务词表:口语 → 知识库里的指标名 / 维度取值。
+#
+# 这是**业务方维护**的文件,改动走 PR,和指标口径一样需要 review。
+# 代码里没有任何写死的业务词 —— 换一家公司,只改这里和 metrics/*.yaml。
+#
+# 维度取值不需要全部列在这里:仓库里实际存在的取值(US、mobile、Paid Search …)
+# 会在启动时实时查出来,问题里直接出现就能识别。这里只放「口语说法」。
+
+# 出现这些词,问题走「归因」路径(确定性分解,不经 LLM);否则走「查数」路径(text-to-SQL)。
+explain_keywords:
+  - 为什么
+  - 为啥
+  - 原因
+  - 归因
+  - 怎么回事
+  - 什么导致
+  - 驱动因素
+  - why
+  - what caused
+  - what drove
+  - root cause
+  - explain
+
+# 顺序即匹配优先级:更具体的说法放前面(「订单转化率」应识别为转化率,而不是订单量)。
+metrics:
+  cvr: [转化率, conversion rate, cvr]
+  aov: [客单价, average order value, aov]
+  orders: [订单量, 订单数, 单量, order count, orders]
+  uv: [流量, 访问量, 会话数, traffic, sessions, uv]
+  gmv: [gmv, 成交额, 销售额, 营收, revenue, sales]
+
+default_metric: gmv
+
+values:
+  market: {美国: US, 美国站: US, 英国: UK, 英国站: UK, 德国: DE, 德国站: DE}
+  region: {北美: NA, 欧洲: EMEA}
+  device: {移动端: mobile, 手机: mobile, 桌面端: desktop, 电脑: desktop, PC: desktop}
+  channel: {付费搜索: Paid Search, 搜索广告: Paid Search, 自然流量: Organic, 社交: Social, 邮件: Email, 直接访问: Direct}
+
+# 对比窗口。都没出现时默认 week(上周 vs 前一周)。
+periods:
+  day: [昨天, 昨日, yesterday]
+  week: [上周, 上一周, last week]

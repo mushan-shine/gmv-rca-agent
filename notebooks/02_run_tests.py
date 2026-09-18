@@ -54,10 +54,10 @@ print("测试目标:", os.environ["DATABRICKS_CATALOG"], ".", os.environ["RCA_TE
 # MAGIC %md
 # MAGIC ## 1. 不需要数据库的那部分
 # MAGIC
-# MAGIC 知识库校验、手算对照、SQL 方言校验、凭据处理、SQL 守卫与比对器、LLM 接入层(用假 HTTP)——
+# MAGIC 知识库校验、手算对照、SQL 方言校验、凭据处理、SQL 守卫与比对器、LLM 接入层(用假 HTTP)、问题分流 ——
 # MAGIC 先跑这些,快且能提前发现低级错误。
 # MAGIC
-# MAGIC **期望:`168 passed, 1 skipped`**(跳过的那条需要本地 duckdb)
+# MAGIC **期望:`198 passed, 1 skipped`**(跳过的那条需要本地 duckdb)
 
 # COMMAND ----------
 
@@ -72,6 +72,7 @@ offline = pytest.main([
     "tests/test_config.py",
     "tests/test_nl2sql_units.py",
     "tests/test_llm.py",
+    "tests/test_assistant_router.py",
 ])
 print("\n退出码:", offline)
 assert offline == 0, "离线测试未通过 —— 先修这些,不要急着连库"
@@ -88,8 +89,9 @@ assert offline == 0, "离线测试未通过 —— 先修这些,不要急着连�
 # MAGIC * 职责边界:越线必须报错(`test_decompose_guards.py`)
 # MAGIC * **循环本身** —— 自修复、评估器自检、状态表、改进闭环(`test_nl2sql_loop.py`)
 # MAGIC * **自主改进循环** —— 提议、裁决、台账、跨循环记忆、维度取值检查(`test_improve.py`)
+# MAGIC * **问答助手** —— 归因数字与直接 SQL 一致、查数走自修复、失败与 👎 进待复核队列(`test_assistant.py`)
 # MAGIC
-# MAGIC **期望:`133 passed, 1 skipped`**(跳过的那条是 duckdb 专用)
+# MAGIC **期望:`142 passed, 1 skipped`**(跳过的那条是 duckdb 专用)
 # MAGIC
 # MAGIC ⚠ 第一次跑要等 serverless 计算启动,可能一两分钟。
 
@@ -104,6 +106,7 @@ online = pytest.main([
     "tests/test_decompose_guards.py",
     "tests/test_nl2sql_loop.py",
     "tests/test_improve.py",
+    "tests/test_assistant.py",
 ])
 print("\n退出码:", online)
 assert online == 0, "在 Databricks 上未通过 —— 这才是真正要紧的失败"

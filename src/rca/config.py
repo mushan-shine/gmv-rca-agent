@@ -36,6 +36,7 @@ ENV_HTTP_PATH = "DATABRICKS_HTTP_PATH"
 ENV_TOKEN = "DATABRICKS_TOKEN"
 ENV_CATALOG = "DATABRICKS_CATALOG"
 ENV_SCHEMA = "DATABRICKS_SCHEMA"
+ENV_WAREHOUSE_ID = "DATABRICKS_WAREHOUSE_ID"
 
 
 class ConfigError(RcaError):
@@ -215,6 +216,52 @@ def build_target(
         )
 
     raise ConfigError(f"未知运行目标 {name!r};可选:{TARGET_NAMES}")
+
+
+def build_app_target(
+    *,
+    catalog: str | None = None,
+    schema: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Target:
+    """Databricks Apps 里的运行目标:用 App 自己的 service principal 连 SQL Warehouse。
+
+    Apps 会自动注入 ``DATABRICKS_HOST`` / ``DATABRICKS_CLIENT_ID`` / ``DATABRICKS_CLIENT_SECRET``,
+    ``databricks-sdk`` 的 ``Config()`` 据此做 OAuth;warehouse 由 ``app.yaml`` 里声明的资源
+    注入成 ``DATABRICKS_WAREHOUSE_ID``。全程不经手任何个人 token。
+
+    这个 service principal 在 Unity Catalog 里只需要 schema 上的 ``SELECT``
+    (外加写两张问答日志表的权限)—— 守卫之外,权限层再挡一次。
+    """
+    env = os.environ if env is None else env
+    warehouse_id = (env.get(ENV_WAREHOUSE_ID) or "").strip()
+    if not warehouse_id:
+        raise ConfigError(
+            f"缺少 {ENV_WAREHOUSE_ID}。在 App 的 Resources 里添加一个 SQL warehouse,"
+            f"资源键填 sql-warehouse(与 app.yaml 一致)。"
+        )
+    try:
+        from databricks.sdk.core import Config
+    except ImportError as exc:  # pragma: no cover - 环境相关
+        raise ConfigError("缺少 databricks-sdk;Databricks Apps 环境里是预装的") from exc
+
+    sdk_config = Config()
+    hostname = (sdk_config.host or "").removeprefix("https://").removeprefix("http://").rstrip("/")
+    dialect = DatabricksDialect(
+        catalog=catalog or env.get(ENV_CATALOG) or DEFAULT_CATALOG,
+        schema=schema or env.get(ENV_SCHEMA) or DEFAULT_SCHEMA,
+    )
+    executor = DatabricksExecutor(
+        server_hostname=hostname,
+        http_path=f"/sql/1.0/warehouses/{warehouse_id}",
+        credentials_provider=lambda: sdk_config.authenticate,
+    )
+    return Target(
+        name="databricks-app",
+        dialect=dialect,
+        executor=executor,
+        description=f"SQL Warehouse(App service principal)→ {dialect.qualify('*')}",
+    )
 
 
 def _active_spark_session() -> Any:

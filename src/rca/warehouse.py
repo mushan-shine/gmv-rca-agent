@@ -16,11 +16,23 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Protocol, Sequence, runtime_checkable
 
 from .errors import QueryExecutionError
+
+MAX_LOGGED_SQL = 500
+"""每个执行器最多保留多少条最近执行的 SQL。
+
+批处理跑完即退出,留多少都无所谓;但问答助手是常驻进程,
+不设上限的话这份审计记录会随请求数无限增长。"""
+
+
+def _sql_log() -> deque[str]:
+    return deque(maxlen=MAX_LOGGED_SQL)
+
 
 _WHITESPACE = re.compile(r"\s+")
 
@@ -78,7 +90,7 @@ class DuckDBExecutor:
 
     connection: Any
     dialect_name: str = "duckdb"
-    executed: list[str] = field(default_factory=list)
+    executed: deque[str] = field(default_factory=_sql_log)
 
     def run(self, sql: str) -> list[dict[str, Any]]:
         self.executed.append(sql)
@@ -106,10 +118,13 @@ class DatabricksExecutor:
 
     server_hostname: str
     http_path: str
-    access_token: str = field(repr=False)
+    access_token: str = field(default="", repr=False)
     dialect_name: str = "databricks"
-    executed: list[str] = field(default_factory=list)
+    executed: deque[str] = field(default_factory=_sql_log)
     _connection: Any = field(default=None, repr=False)
+    credentials_provider: Callable[[], Any] | None = field(default=None, repr=False)
+    """OAuth 凭据(Databricks Apps 里用 App 自己的 service principal)。
+    给了它就不用 ``access_token`` —— 线上服务不该拿某个人的个人 token 去连仓库。"""
 
     def _connect(self) -> Any:
         if self._connection is not None:
@@ -121,10 +136,15 @@ class DatabricksExecutor:
                 "缺少 databricks-sql-connector。安装:pip install '.[databricks]'"
             ) from exc
         try:
+            auth: dict[str, Any] = (
+                {"credentials_provider": self.credentials_provider}
+                if self.credentials_provider is not None
+                else {"access_token": self.access_token}
+            )
             self._connection = dbsql.connect(
                 server_hostname=self.server_hostname,
                 http_path=self.http_path,
-                access_token=self.access_token,
+                **auth,
             )
         except Exception as exc:  # noqa: BLE001
             raise QueryExecutionError(
@@ -172,7 +192,7 @@ class SparkExecutor:
 
     spark: Any
     dialect_name: str = "databricks"
-    executed: list[str] = field(default_factory=list)
+    executed: deque[str] = field(default_factory=_sql_log)
 
     def run(self, sql: str) -> list[dict[str, Any]]:
         self.executed.append(sql)

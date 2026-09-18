@@ -1,0 +1,9 @@
+# Databricks Apps 部署时自动安装这个文件(App 源码目录 = 仓库根)。
+# 本地开发用 pyproject.toml;notebook / Job 用 requirements-databricks.txt。
+streamlit>=1.35
+pandas>=2.0
+databricks-sdk>=0.30
+databricks-sql-connector>=3.0
+pydantic>=2.7
+PyYAML>=6.0
+sqlglot>=25.0

@@ -16,6 +16,7 @@
 6. [出具验收证据(notebook `02_run_tests`)](#6-出具验收证据)
 7. [跑循环主线(notebook `03_nl2sql_loop`)](#7-跑循环主线)
 7b. [跑自主改进循环(notebook `04_improvement_loop`)](#7b-跑自主改进循环)
+7c. [用问答助手提问(notebook `05_assistant`)](#7c-用问答助手提问)
 8. [纯 SQL 路线(不用 notebook)](#8-纯-sql-路线)
 9. [建 Job:把循环挂上定时](#9-建-job)
 10. [排查表](#10-排查表)
@@ -205,8 +206,8 @@ sessions_converted   14416          ← 必须与上一行相等
 **期望看到:**
 
 ```
-168 passed, 1 skipped     ← 第 1 段:离线部分
-133 passed, 1 skipped     ← 第 2 段:跑在 Spark 上
+198 passed, 1 skipped     ← 第 1 段:离线部分
+142 passed, 1 skipped     ← 第 2 段:跑在 Spark 上
 因子分解残差      -1.074e-12 %   (要求 < 0.1%)
 维度分解最大残差   1.440e-13 %   (要求 < 0.1%)
 ```
@@ -416,6 +417,24 @@ databricks secrets list-secrets llm
 
 ---
 
+## 7c. 用问答助手提问
+
+`00`~`04` 证明系统答得对、能变准;`05` 是给人**用**的入口。
+
+1. 打开 `notebooks/05_assistant.py`,右上角 **Serverless**
+2. **Run all** 一次
+3. 之后每次提问:改顶部 `question` 组件 → **只运行第 3 格**
+
+| 问法 | 走哪条路 | 要不要 LLM |
+|---|---|---|
+| 「上周 GMV **为什么**变化了?」 | 归因:确定性分解,数字全部来自查询结果 | 不要 |
+| 「上周美国站 GMV **为什么**下降?」 | 归因 + 按市场过滤 | 不要 |
+| 「上周各渠道的 GMV **是多少**?」 | 查数:text-to-SQL 自修复循环 | 要 |
+
+网页聊天界面(Databricks Apps)、权限配置、上线后的循环,见 **[DEPLOYMENT.md](DEPLOYMENT.md)**。
+
+---
+
 ## 8. 纯 SQL 路线
 
 不想用 notebook、只想看数据长什么样时用这条。
@@ -440,34 +459,36 @@ databricks secrets list-secrets llm
 
 ## 9. 建 Job
 
-把评估挂成定时任务,就有了一条**跨天累积的指标时间序列** ——
-简历上「持续评估」这句话需要有它做底。五分钟。
+三个定时任务定义在仓库根的 `databricks.yml`(默认全部暂停):
 
-1. 左侧 **Jobs & Pipelines**(或 Workflows)→ **Create** → **Job**
-2. Task name:`setup`
-3. Type:**Notebook**
-4. Source:**Git provider**(如果用了 Git folder 就选 Workspace 也行)
-5. Path:`gmv-rca-agent/notebooks/00_setup.py`
-6. Compute:**Serverless**
-7. **Parameters** 里加两项(对应 notebook 的 widget):
-   - `catalog` = `<CATALOG>`
-   - `schema` = `gmv_rca`
-8. 右侧 **Schedule** → 需要定时就设,比如每天 07:00
-9. **Create** → **Run now** 验证一次
+| Job | 频率 | 运行 | 作用 |
+|---|---|---|---|
+| 每日评估 | 每天 02:00 | `03`(`llm_provider=zhipu`) | 指标写进 `nl2sql_eval_runs`,积累跨天的指标时间序列 |
+| 每周自主改进 | 周日 03:00 | `04`(6 轮、耐心 4) | 采纳的提示只进台账,合并进线上要人在 Git 里 review |
+| 每周 GMV 归因 | 周一 09:00 | `05`(`llm_provider=none`) | 自动回答「上周 GMV 为什么变化」,不需要 LLM |
 
-再加第二个 task,依赖第一个:
+本机已经配好 CLI 的话,三条命令部署:
 
-* Task name:`evaluate`
-* Path:`gmv-rca-agent/notebooks/03_nl2sql_loop.py`
-* Depends on:`setup`
+```bash
+databricks bundle validate
+```
 
-于是每天:重建样例数据 → 跑评估 → 往 `nl2sql_eval_runs` 追加一行。
-**Runs** 页面会留下每次执行的日志与耗时,Delta 表里会积累一条指标时间序列 ——
-「这个知识版本比上个版本好在哪」从此有据可查,而不是凭印象。
+```bash
+databricks bundle deploy
+```
+
+```bash
+databricks bundle run weekly_gmv_report
+```
+
+不用 CLI、在界面上建的逐字段说明,见 [DEPLOYMENT.md 第五节](DEPLOYMENT.md#五入口-定时任务)。
+
+> ⚠ `03` 的 `llm_provider` 默认是 `databricks`。挂 Job 时一定要传 `zhipu`,
+> 否则会退回 `ReferenceGenerator`,评估的就不是真模型了。
 
 > 注意判据:定时跑评估本身**还不是**循环。
-> 它成为循环,是因为 `03` 里的改进环节会读上一轮写下的失败记录、
-> 产出新的 few-shot,而下一轮生成时 prompt 里就有了它。
+> 它成为循环,是因为 `04` 会读上一轮写下的失败和台账、提出新提示,
+> 而合并之后下一轮生成时 prompt 里就有了它。
 
 ---
 

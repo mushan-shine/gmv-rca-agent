@@ -1,0 +1,89 @@
+# Databricks Asset Bundle:把「一步步手动跑」变成定时任务。
+#
+#   databricks bundle validate
+#   databricks bundle deploy          # 部署到 dev 目标(只建 Job,不会立刻运行)
+#   databricks bundle run weekly_gmv_report   # 手动触发一次
+#
+# 三个 Job 默认都是 PAUSED:部署之后先手动跑一次确认没问题,再到 Jobs 页面把调度打开。
+# 不写 cluster 配置 —— notebook 任务在 Free Edition 上自动用 serverless。
+#
+# 不想装 CLI 的话,在 UI 里建同样的 Job 也完全可以,步骤见 docs/DATABRICKS_SETUP.md 第 9 节。
+bundle:
+  name: gmv-rca-agent
+
+variables:
+  catalog:
+    default: workspace
+  schema:
+    default: gmv_rca
+  llm_provider:
+    description: 查数/评估用的 LLM(zhipu / databricks)
+    default: zhipu
+
+resources:
+  jobs:
+    # 每天:用当前知识版本把评估集完整跑一遍。指标写进 nl2sql_eval_runs,
+    # 与同一模型上一次的结果比较 —— 模型供应商悄悄换了版本、数据变了,这里第一时间看到。
+    nightly_eval:
+      name: "[gmv-rca] 每日评估"
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: Asia/Shanghai
+        pause_status: PAUSED
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: eval
+          notebook_task:
+            notebook_path: ./notebooks/03_nl2sql_loop.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              llm_provider: ${var.llm_provider}
+      email_notifications:
+        on_failure: ["${workspace.current_user.userName}"]
+
+    # 每周:自主改进循环。被采纳的提示只写进台账和评估表,**不会自动改线上知识** ——
+    # 合并进 prompting.yaml 要人在 Git 里 review。
+    weekly_improve:
+      name: "[gmv-rca] 每周自主改进"
+      schedule:
+        quartz_cron_expression: "0 0 3 ? * SUN"
+        timezone_id: Asia/Shanghai
+        pause_status: PAUSED
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: improve
+          notebook_task:
+            notebook_path: ./notebooks/04_improvement_loop.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              llm_provider: ${var.llm_provider}
+              max_rounds: "6"
+              patience: "4"
+          timeout_seconds: 5400
+      email_notifications:
+        on_failure: ["${workspace.current_user.userName}"]
+
+    # 每周一早上:自动回答「上周 GMV 为什么变化」。归因不需要 LLM。
+    # 结果写进 assistant_requests,在 Job 运行页面的 notebook 输出里直接可读。
+    weekly_gmv_report:
+      name: "[gmv-rca] 每周 GMV 归因"
+      schedule:
+        quartz_cron_expression: "0 0 9 ? * MON"
+        timezone_id: Asia/Shanghai
+        pause_status: PAUSED
+      tasks:
+        - task_key: report
+          notebook_task:
+            notebook_path: ./notebooks/05_assistant.py
+            base_parameters:
+              question: 上周 GMV 为什么变化了?
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              llm_provider: none
+
+targets:
+  dev:
+    mode: development
+    default: true
